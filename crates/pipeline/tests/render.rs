@@ -395,3 +395,81 @@ fn property_random_states_never_panic() {
         let _ = r.render_full(&pyr, Quality::Final);
     }
 }
+
+#[test]
+fn masked_spatial_and_crop_through_pipeline() {
+    // Left half bright, right half dark; a brush-masked clarity boosts local
+    // contrast only where painted; a crop cuts the output.
+    let base = photoforge_core::LinearImage::from_fn(120, 60, |x, _| {
+        let v = if x < 60 { 0.9 } else { 0.2 };
+        [v, v, v, 1.0]
+    })
+    .to_pixel_buffer();
+    let pyr = pyramid_of(base.clone());
+    let mut state = identity_state();
+    // Paint the brush centered on the brightness edge (x = 60/120 = 0.5).
+    state.adjustments[14] = photoforge_pipeline::Adjustment::masked(
+        OpParams::Clarity { amount: 0.8 },
+        Mask::Brush {
+            strokes: vec![Stroke {
+                points: vec![[0.5, 0.5], [0.5, 0.5]],
+                radius: 0.12,
+                hardness: 0.9,
+                flow: 1.0,
+                erase: false,
+            }],
+        },
+    );
+    state.geometry.crop = Some(photoforge_pipeline::CropRect {
+        x: 20,
+        y: 10,
+        w: 60,
+        h: 30,
+    });
+    let mut r = Renderer::new(state);
+    let out = r.render_level(&pyr, 0, Quality::Final);
+    assert_eq!((out.width(), out.height()), (60, 30), "crop applied");
+
+    // Mask-0 region (bright side, source x < ~45): bit-exact base values.
+    let base_crop = base.region(20, 10, 60, 30);
+    assert_eq!(
+        out.pixel(10, 15),
+        base_crop.pixel(10, 15),
+        "mask-0 untouched"
+    );
+    assert_eq!(out.pixel(0, 0), base_crop.pixel(0, 0), "mask-0 corner");
+    // Painted side (source x > 60): clarity darkens the dark flank of the
+    // edge (source x=62 = crop x=42).
+    let painted = out.pixel(42, 15)[0];
+    let base_px = base_crop.pixel(42, 15)[0];
+    assert!(
+        i16::from(painted) < i16::from(base_px) - 20,
+        "clarity must darken painted flank: {painted} vs {base_px}"
+    );
+}
+
+#[test]
+fn brush_mask_spatial_matches_unmasked_outside() {
+    // Away from the painted circle, a masked blur must be a no-op.
+    let base = photoforge_fixtures::radial(80, 80);
+    let pyr = pyramid_of(base.clone());
+    let mut state = identity_state();
+    state.adjustments[16] = photoforge_pipeline::Adjustment::masked(
+        OpParams::Blur { radius: 6.0 },
+        Mask::Brush {
+            strokes: vec![Stroke {
+                points: vec![[0.5, 0.5], [0.5, 0.5]],
+                radius: 0.1,
+                hardness: 0.95,
+                flow: 1.0,
+                erase: false,
+            }],
+        },
+    );
+    let mut r = Renderer::new(state);
+    let out = r.render_level(&pyr, 0, Quality::Final);
+    // Corner: mask = 0 → identical to the base image.
+    assert_eq!(out.pixel(2, 2), base.pixel(2, 2), "mask-0 region untouched");
+    // Center: blurred (not equal, but close to the local average).
+    assert_ne!(out.pixel(40, 40), base.pixel(40, 40));
+}

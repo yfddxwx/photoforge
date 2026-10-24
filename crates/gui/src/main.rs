@@ -4,6 +4,7 @@ mod app;
 mod canvas;
 mod curve_editor;
 mod effects_panel;
+mod locals_panel;
 mod panels;
 mod slider;
 mod worker;

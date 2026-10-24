@@ -233,18 +233,12 @@ impl Renderer {
                 };
                 op.apply_image(&mut next);
                 if let Some(m) = &mask {
-                    for y in 0..h {
-                        for x in 0..w {
-                            let i = (y * w + x) as usize;
-                            let mv = m[i];
-                            if mv <= 0.0 {
-                                continue;
-                            }
-                            let mv = mv.min(1.0);
-                            for c in 0..4 {
-                                let j = i * 4 + c;
-                                next.data[j] = lerp(cur.data[j], next.data[j], mv);
-                            }
+                    // Blend every pixel: mask 0 restores the pre-op value.
+                    for (i, &mv) in m.iter().enumerate() {
+                        let mv = mv.clamp(0.0, 1.0);
+                        for c in 0..4 {
+                            let j = i * 4 + c;
+                            next.data[j] = lerp(cur.data[j], next.data[j], mv);
                         }
                     }
                 }
@@ -354,11 +348,10 @@ fn apply_adjustment(
             let original = lin.clone();
             op.apply_image(&mut lin);
             if let Some(m) = &mask {
+                // Blend EVERY pixel (mask 0 must restore the original —
+                // the spatial op ran over the whole frame).
                 for (i, &mv) in m.iter().enumerate() {
-                    if mv <= 0.0 {
-                        continue;
-                    }
-                    let mv = mv.min(1.0);
+                    let mv = mv.clamp(0.0, 1.0);
                     for c in 0..4 {
                         let j = i * 4 + c;
                         lin.data[j] = lerp(original.data[j], lin.data[j], mv);

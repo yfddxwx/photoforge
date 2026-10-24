@@ -5,7 +5,7 @@ use photoforge_ops::params::GLOBAL_OP_ORDER;
 use photoforge_ops::OpParams;
 
 use crate::app::PhotoForgeApp;
-use crate::canvas::{self, CanvasInput, CanvasResponse};
+use crate::canvas::{self, CanvasEvent, CanvasInput};
 use crate::curve_editor::{self, CurveChannel};
 use crate::slider::{fmt_plain, fmt_signed, fmt_stops, ParamRow};
 
@@ -120,6 +120,16 @@ pub fn adjustment_panel(app: &mut PhotoForgeApp, ctx: &egui::Context) {
                 crate::effects_panel::effect_section(app, ui, crate::effects_panel::VIGNETTE);
                 crate::effects_panel::effect_section(app, ui, crate::effects_panel::BLACK_WHITE);
                 crate::effects_panel::effect_section(app, ui, crate::effects_panel::DUOTONE);
+
+                ui.add_space(6.0);
+                ui.strong("Geometry");
+                ui.separator();
+                crate::locals_panel::geometry_section(app, ui);
+
+                ui.add_space(6.0);
+                ui.strong("Local Adjustments");
+                ui.separator();
+                crate::locals_panel::local_adjustments_section(app, ui);
 
                 ui.add_space(8.0);
                 ui.weak(format!(
@@ -669,30 +679,38 @@ fn histogram_widget(app: &mut PhotoForgeApp, ui: &mut egui::Ui) {
     ));
 }
 
-pub fn central_canvas(app: &mut PhotoForgeApp, ctx: &egui::Context) -> Option<CanvasResponse> {
+pub fn central_canvas(app: &mut PhotoForgeApp, ctx: &egui::Context) -> Vec<CanvasEvent> {
     // Snapshot Copy-able state to keep borrows disjoint across the closure.
     let (texture, tw, th) = match app.preview() {
         Some(p) => (Some(p.0.clone()), p.1, p.2),
         None => (None, 0, 0),
     };
+    let before = app.before_texture().cloned();
+    let mask_overlay = app.mask_overlay.clone();
     let image_size = app.image().map(|i| [i.width, i.height]);
     let file_name = app
         .image()
         .map(|i| i.file_name.clone())
         .unwrap_or_else(|| "no image".to_string());
     let mut view = *app.view();
+    let mut input = CanvasInput {
+        image_size,
+        file_name: &file_name,
+        tool: app.tool,
+        gradient_drag: &mut app.gradient_drag,
+        crop: app.crop_session.as_mut(),
+        before_texture: before.as_ref(),
+        compare: app.compare,
+        mask_overlay: mask_overlay.as_ref(),
+    };
 
-    let response = egui::CentralPanel::default()
+    let events = egui::CentralPanel::default()
         .show(ctx, |ui| {
-            let input = CanvasInput {
-                image_size,
-                file_name: &file_name,
-            };
-            canvas::show(ui, &mut view, texture.as_ref(), [tw, th], &input)
+            canvas::show(ui, &mut view, texture.as_ref(), [tw, th], &mut input)
         })
         .inner;
     *app.view() = view;
-    response
+    events
 }
 
 pub fn export_dialog(app: &mut PhotoForgeApp, ctx: &egui::Context) {

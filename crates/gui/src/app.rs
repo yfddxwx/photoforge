@@ -5,9 +5,11 @@ use std::sync::Arc;
 
 use photoforge_core::histogram::Histogram;
 use photoforge_io::{ExifSummary, ImagePyramid};
+use photoforge_ops::OpParams;
+use photoforge_pipeline::mask::{Mask, Stroke};
 use photoforge_pipeline::EditState;
 
-use crate::canvas::{CanvasResponse, ViewState};
+use crate::canvas::{BrushParams, CanvasEvent, Compare, CropSession, Tool, ViewState};
 use crate::worker::{Frame, Request, Worker};
 
 /// A rendered preview ready for display.
@@ -31,10 +33,8 @@ pub struct OpenImage {
 
 pub struct PhotoForgeApp {
     worker: Worker,
-    /// UI-side source of truth; cloned into each render request.
     state: Arc<EditState>,
     state_rev: u64,
-    inflight_rev: u64,
     interacting: bool,
 
     image: Option<OpenImage>,
@@ -42,6 +42,20 @@ pub struct PhotoForgeApp {
     preview: Option<Preview>,
     hist: Option<Histogram>,
     render_ms: f32,
+    before_texture: Option<egui::TextureHandle>,
+
+    // Tools (M7).
+    pub tool: Tool,
+    pub brush: BrushParams,
+    pub gradient_drag: Option<[f32; 2]>,
+    pub compare: Compare,
+    /// Index into `state.adjustments` of the local adjustment being masked.
+    pub active_local: Option<usize>,
+    /// Crop tool session; present while the crop tool is active.
+    pub crop_session: Option<CropSession>,
+    /// Mask overlay texture (rebuilt on mask edits / selection changes).
+    pub mask_overlay: Option<egui::TextureHandle>,
+    mask_overlay_key: (u64, [u32; 2]),
 
     status: String,
     export_open: bool,
@@ -58,13 +72,21 @@ impl PhotoForgeApp {
             worker: Worker::spawn(),
             state: Arc::new(EditState::with_global_stack()),
             state_rev: 1,
-            inflight_rev: 0,
             interacting: false,
             image: None,
             view: ViewState::default(),
             preview: None,
             hist: None,
             render_ms: 0.0,
+            before_texture: None,
+            tool: Tool::Navigate,
+            brush: BrushParams::default(),
+            gradient_drag: None,
+            compare: Compare::Off,
+            active_local: None,
+            crop_session: None,
+            mask_overlay: None,
+            mask_overlay_key: (0, [0, 0]),
             status: "Open an image (Ctrl+O) to start editing.".into(),
             export_open: false,
             export_path: String::new(),
@@ -76,10 +98,12 @@ impl PhotoForgeApp {
         if let Some(path) = image_path {
             app.request_open(path);
         }
-        // Keep ticking even without user input so worker frames arrive.
-        cc.egui_ctx
-            .request_repaint_after(std::time::Duration::from_millis(33));
+        let _ = cc;
         app
+    }
+
+    pub fn request_open_pub(&mut self, path: PathBuf) {
+        self.request_open(path);
     }
 
     fn request_open(&mut self, path: PathBuf) {
@@ -88,32 +112,117 @@ impl PhotoForgeApp {
         }
     }
 
-    pub fn set_status_pub(&mut self, s: impl Into<String>) {
-        self.status = s.into();
-    }
-
-    /// Public entry for panel-initiated opens.
-    pub fn request_open_pub(&mut self, path: PathBuf) {
-        self.request_open(path);
-    }
-
     /// Bumps the state revision and schedules a render.
-    fn state_changed(&mut self, ctx: &egui::Context, interacting: bool) {
+    pub fn state_changed(&mut self, ctx: &egui::Context, interacting: bool) {
         self.state_rev += 1;
         self.interacting = interacting;
         self.send_render(ctx);
     }
 
-    fn send_render(&mut self, ctx: &egui::Context) {
+    pub fn send_render(&mut self, ctx: &egui::Context) {
         let target_px = self.view.target_px_hint().max(64.0) as u32;
-        self.inflight_rev = self.state_rev;
+        let mut state = self.state.clone();
+        if self.crop_session.is_some() {
+            // The crop tool needs the pre-crop frame as the canvas backdrop.
+            Arc::make_mut(&mut state).geometry.crop = None;
+        }
         let _ = self.worker.tx.send(Request::Render {
             rev: self.state_rev,
-            state: self.state.clone(),
+            state,
             target_px,
             interacting: self.interacting,
         });
         ctx.request_repaint();
+    }
+
+    /// Adds a local adjustment of the given op kind (ADR-0008) and selects it.
+    pub fn add_local_adjustment(&mut self, ctx: &egui::Context, op: OpParams) {
+        let adj = photoforge_pipeline::Adjustment::masked(
+            op,
+            Mask::Brush {
+                strokes: Vec::new(),
+            },
+        );
+        self.edit_state(ctx, false, |s| {
+            s.adjustments.push(adj);
+        });
+        self.active_local = Some(self.state.adjustments.len() - 1);
+    }
+
+    pub fn remove_local_adjustment(&mut self, ctx: &egui::Context, idx: usize) {
+        self.edit_state(ctx, false, |s| {
+            if idx >= photoforge_ops::params::GLOBAL_OP_ORDER.len() && idx < s.adjustments.len() {
+                s.adjustments.remove(idx);
+            }
+        });
+        self.active_local = None;
+        self.mask_overlay = None;
+    }
+
+    /// Appends a brush stroke sample to the active local adjustment's mask.
+    pub fn push_stroke_point(&mut self, pt: [f32; 2]) {
+        let Some(idx) = self.active_local else {
+            return;
+        };
+        let state = Arc::make_mut(&mut self.state);
+        let Some(adj) = state.adjustments.get_mut(idx) else {
+            return;
+        };
+        let brush = self.brush;
+        let mask = adj.mask.get_or_insert_with(|| Mask::Brush {
+            strokes: Vec::new(),
+        });
+        if let Mask::Brush { strokes } = mask {
+            let need_new = match strokes.last() {
+                Some(last) => last.erase != brush.erase,
+                None => true,
+            };
+            if need_new {
+                strokes.push(Stroke {
+                    points: vec![pt],
+                    radius: brush.radius,
+                    hardness: brush.hardness,
+                    flow: brush.flow,
+                    erase: brush.erase,
+                });
+            } else if let Some(last) = strokes.last_mut() {
+                last.points.push(pt);
+            }
+        }
+    }
+
+    /// Finishes the current stroke (commits a refined render).
+    pub fn end_stroke(&mut self, ctx: &egui::Context) {
+        self.state_changed(ctx, false);
+    }
+
+    /// Sets a gradient mask on the active local adjustment.
+    pub fn set_gradient_mask(
+        &mut self,
+        ctx: &egui::Context,
+        linear: bool,
+        start: [f32; 2],
+        end: [f32; 2],
+    ) {
+        let Some(idx) = self.active_local else {
+            return;
+        };
+        self.edit_state(ctx, false, |s| {
+            if let Some(adj) = s.adjustments.get_mut(idx) {
+                adj.mask = Some(if linear {
+                    Mask::LinearGradient { start, end }
+                } else {
+                    Mask::RadialGradient {
+                        center: [(start[0] + end[0]) / 2.0, (start[1] + end[1]) / 2.0],
+                        radius: [
+                            ((end[0] - start[0]).abs() / 2.0).max(0.02),
+                            ((end[1] - start[1]).abs() / 2.0).max(0.02),
+                        ],
+                        feather: 0.5,
+                    }
+                });
+            }
+        });
     }
 
     fn poll_worker(&mut self, ctx: &egui::Context) {
@@ -127,6 +236,17 @@ impl PhotoForgeApp {
                         payload.height,
                         payload.pyramid,
                     );
+                    // Before-compare texture from a fit-level of the original.
+                    let level = pyramid.level_for_target(1600);
+                    let buf = photoforge_io::ImagePyramid::level(&pyramid, level);
+                    self.before_texture = Some(ctx.load_texture(
+                        "before",
+                        egui::ColorImage::from_rgba_unmultiplied(
+                            [buf.width() as usize, buf.height() as usize],
+                            buf.as_raw(),
+                        ),
+                        egui::TextureOptions::LINEAR,
+                    ));
                     self.image = Some(OpenImage {
                         file_name: path
                             .file_name()
@@ -139,6 +259,9 @@ impl PhotoForgeApp {
                         pyramid,
                     });
                     self.view = ViewState::default();
+                    self.crop_session = None;
+                    self.active_local = None;
+                    self.mask_overlay = None;
                     self.status = format!(
                         "Loaded {} ({}×{})",
                         self.image.as_ref().expect("just set").path.display(),
@@ -183,8 +306,6 @@ impl PhotoForgeApp {
                             level,
                         });
                     }
-                    // When an interaction frame lands and dragging is over,
-                    // request the refined frame.
                     if interacting && !self.interacting {
                         self.send_render(ctx);
                     }
@@ -208,7 +329,97 @@ impl PhotoForgeApp {
         ctx.request_repaint_after(std::time::Duration::from_millis(33));
     }
 
-    fn open_file_dialog(&mut self) {
+    /// Rebuilds the red mask overlay for the active local adjustment at half
+    /// the preview size (cheap UI-thread rasterization, keyed by state rev).
+    fn refresh_mask_overlay(&mut self, ctx: &egui::Context) {
+        let Some(size) = self
+            .preview
+            .as_ref()
+            .map(|p| [(p.width / 2).max(1) as u32, (p.height / 2).max(1) as u32])
+        else {
+            return;
+        };
+        let key = (self.state_rev, size);
+        if self.mask_overlay_key == key && self.mask_overlay.is_some() {
+            return;
+        }
+        let Some(idx) = self.active_local else {
+            self.mask_overlay = None;
+            self.mask_overlay_key = key;
+            return;
+        };
+        let Some(adj) = self.state.adjustments.get(idx) else {
+            self.mask_overlay = None;
+            self.mask_overlay_key = key;
+            return;
+        };
+        let Some(mask) = adj.mask.as_ref() else {
+            self.mask_overlay = None;
+            self.mask_overlay_key = key;
+            return;
+        };
+        let raster = mask.rasterize(size[0], size[1]);
+        let mut rgba = vec![0u8; raster.len() * 4];
+        for (i, &m) in raster.iter().enumerate() {
+            rgba[i * 4] = 255;
+            rgba[i * 4 + 1] = 40;
+            rgba[i * 4 + 2] = 60;
+            rgba[i * 4 + 3] = (m * 110.0) as u8;
+        }
+        self.mask_overlay = Some(ctx.load_texture(
+            "mask_overlay",
+            egui::ColorImage::from_rgba_unmultiplied([size[0] as usize, size[1] as usize], &rgba),
+            egui::TextureOptions::LINEAR,
+        ));
+        self.mask_overlay_key = key;
+    }
+
+    fn handle_canvas_events(&mut self, ctx: &egui::Context, events: Vec<CanvasEvent>) {
+        for ev in events {
+            match ev {
+                CanvasEvent::ViewChanged { interacting } => {
+                    self.state_changed(ctx, interacting);
+                }
+                CanvasEvent::Open => self.open_file_dialog(),
+                CanvasEvent::StrokePoint(p) => {
+                    self.push_stroke_point(p);
+                    self.state_changed(ctx, true);
+                }
+                CanvasEvent::StrokeEnded => self.end_stroke(ctx),
+                CanvasEvent::GradientCommitted { linear, start, end } => {
+                    self.set_gradient_mask(ctx, linear, start, end)
+                }
+                CanvasEvent::CropEdited => {
+                    self.state_changed(ctx, true);
+                }
+                CanvasEvent::SplitMoved(t) => {
+                    self.compare = Compare::Split(t);
+                }
+            }
+        }
+    }
+
+    fn apply_crop(&mut self, ctx: &egui::Context) {
+        if let Some(session) = self.crop_session.take() {
+            let (x, y, w, h) = session.rect_i();
+            self.tool = Tool::Navigate;
+            self.edit_state(ctx, false, |s| {
+                s.geometry.straighten_deg = session.straighten;
+                s.geometry.crop = Some(photoforge_pipeline::CropRect { x, y, w, h });
+            });
+            self.status = format!("Crop applied ({w}×{h})");
+        }
+    }
+
+    fn cancel_crop(&mut self, ctx: &egui::Context) {
+        if self.crop_session.take().is_some() {
+            self.tool = Tool::Navigate;
+            self.edit_state(ctx, false, |_| {});
+            self.status = "Crop cancelled".into();
+        }
+    }
+
+    pub fn open_file_dialog(&mut self) {
         if let Some(path) = rfd::FileDialog::new()
             .add_filter(
                 "Images",
@@ -225,7 +436,6 @@ impl eframe::App for PhotoForgeApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         self.poll_worker(ctx);
 
-        // Global shortcuts.
         ctx.input(|i| {
             if i.modifiers.ctrl && i.key_pressed(egui::Key::O) {
                 self.open_file_dialog();
@@ -240,18 +450,56 @@ impl eframe::App for PhotoForgeApp {
                     self.view.zoom = 1.0;
                     self.view.fit = false;
                 }
+                if i.key_pressed(egui::Key::C) && self.crop_session.is_none() {
+                    let (w, h) = self
+                        .image
+                        .as_ref()
+                        .map(|im| (im.width, im.height))
+                        .unwrap_or((0, 0));
+                    let straighten = self.state.geometry.straighten_deg;
+                    self.crop_session = Some(CropSession::full(w, h, straighten));
+                    self.tool = Tool::Navigate;
+                    self.state_rev += 1;
+                    self.send_render(ctx);
+                }
+                if i.key_pressed(egui::Key::Backslash) && self.compare == Compare::Off {
+                    self.compare = Compare::Hold;
+                }
+                if i.key_released(egui::Key::Backslash) && self.compare == Compare::Hold {
+                    self.compare = Compare::Off;
+                }
+                if i.key_pressed(egui::Key::P) {
+                    self.compare = match self.compare {
+                        Compare::Split(_) | Compare::Hold => Compare::Off,
+                        Compare::Off => Compare::Split(0.5),
+                    };
+                }
+                if i.key_pressed(egui::Key::V) {
+                    self.tool = Tool::Navigate;
+                }
+                if i.key_pressed(egui::Key::B) {
+                    self.tool = Tool::Brush;
+                }
+                if i.key_pressed(egui::Key::G) {
+                    self.tool = Tool::LinearGrad;
+                }
+                if i.key_pressed(egui::Key::R) && !i.modifiers.ctrl {
+                    self.tool = Tool::RadialGrad;
+                }
+                if i.key_pressed(egui::Key::Enter) && self.crop_session.is_some() {
+                    self.apply_crop(ctx);
+                }
+                if i.key_pressed(egui::Key::Escape) && self.crop_session.is_some() {
+                    self.cancel_crop(ctx);
+                }
             });
         }
 
+        self.refresh_mask_overlay(ctx);
         crate::panels::top_bar(self, ctx);
         crate::panels::adjustment_panel(self, ctx);
-        match crate::panels::central_canvas(self, ctx) {
-            Some(CanvasResponse::ViewChanged { interacting }) => {
-                self.state_changed(ctx, interacting);
-            }
-            Some(CanvasResponse::Open) => self.open_file_dialog(),
-            None => {}
-        }
+        let events = crate::panels::central_canvas(self, ctx);
+        self.handle_canvas_events(ctx, events);
         crate::panels::export_dialog(self, ctx);
         crate::panels::status_bar(self, ctx);
     }
@@ -273,6 +521,10 @@ impl PhotoForgeApp {
             .map(|p| (&p.texture, p.width, p.height, p.ms, p.level))
     }
 
+    pub fn before_texture(&self) -> Option<&egui::TextureHandle> {
+        self.before_texture.as_ref()
+    }
+
     pub fn histogram(&self) -> Option<&Histogram> {
         self.hist.as_ref()
     }
@@ -283,6 +535,14 @@ impl PhotoForgeApp {
 
     pub fn status(&self) -> &str {
         &self.status
+    }
+
+    pub fn bump_rev(&mut self) {
+        self.state_rev += 1;
+    }
+
+    pub fn set_status_pub(&mut self, s: impl Into<String>) {
+        self.status = s.into();
     }
 
     pub fn view(&mut self) -> &mut ViewState {
