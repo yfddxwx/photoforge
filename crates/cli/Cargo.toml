@@ -1,0 +1,14 @@
+[package]
+name = "photoforge-cli"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "Headless batch processor: apply presets to a directory and export"
+
+[[bin]]
+name = "photoforge-cli"
+path = "src/main.rs"
+
+[dependencies]

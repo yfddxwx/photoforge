@@ -1,0 +1,62 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/core",
+    "crates/io",
+    "crates/ops",
+    "crates/pipeline",
+    "crates/history",
+    "crates/gui",
+    "crates/cli",
+    "crates/presets",
+    "crates/fixtures",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.80.0"
+license = "MIT"
+authors = ["photoforge contributors"]
+
+[workspace.dependencies]
+photoforge-core = { path = "crates/core", version = "0.1.0" }
+photoforge-io = { path = "crates/io", version = "0.1.0" }
+photoforge-ops = { path = "crates/ops", version = "0.1.0" }
+photoforge-pipeline = { path = "crates/pipeline", version = "0.1.0" }
+photoforge-history = { path = "crates/history", version = "0.1.0" }
+photoforge-presets = { path = "crates/presets", version = "0.1.0" }
+photoforge-fixtures = { path = "crates/fixtures", version = "0.1.0" }
+
+# The only two image-related external crates allowed by ADR-0001.
+image = { version = "0.25", default-features = false, features = [
+    "jpeg",
+    "png",
+    "webp",
+    "tiff",
+    "bmp",
+] }
+kamadak-exif = "0.6"
+
+rayon = "1.10"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "1"
+log = "0.4"
+env_logger = "0.11"
+clap = { version = "4", features = ["derive"] }
+uuid = { version = "1", features = ["v4"] }
+eframe = "0.29"
+rfd = "0.14"
+dirs = "5"
+criterion = "0.5"
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 1
+
+# Keep test runs fast: optimize dependencies (image codecs, rayon, ...) even in
+# the dev/test profile, while our own crates stay fast to compile.
+[profile.dev.package."*"]
+opt-level = 2

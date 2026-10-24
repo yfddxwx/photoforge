@@ -1,0 +1,12 @@
+[package]
+name = "photoforge-fixtures"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "Synthetic test image generator (gradients, solids, noise, test chart)"
+
+[dependencies]
+photoforge-core = { workspace = true }
+image = { workspace = true }
