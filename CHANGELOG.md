@@ -8,6 +8,16 @@ project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Added
 
+- M2: `ops::geometry` — crop, rotate90, flip, straighten (arbitrary angle,
+  edge-fill), perspective correction (4-point DLT homography), Lanczos3 and
+  bilinear resize with proper downscale kernel widening, all resampling in
+  linear light.
+- M2: `photoforge-io` — decode/encode (JPEG/PNG/WebP/TIFF/BMP), EXIF parsing
+  and automatic orientation correction for all 8 orientations, mip image
+  pyramids, thumbnails, metadata summary; garbage input returns errors,
+  never panics (property-tested).
+- M2: ADR-0005 (geometry order, pixel-center convention, resampling policy).
+
 - M0: cargo workspace with crates `core`, `io`, `ops`, `pipeline`, `history`,
   `gui`, `cli`, `presets`, `fixtures`.
 - M0: CI workflow (Windows/Linux/macOS matrix: rustfmt, clippy `-D warnings`,

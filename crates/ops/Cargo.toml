@@ -8,3 +8,5 @@ authors.workspace = true
 description = "Pure image operations (adjustments and geometry) for photoforge"
 
 [dependencies]
+photoforge-core = { workspace = true }
+rayon = { workspace = true }

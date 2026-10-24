@@ -90,13 +90,14 @@ pub fn par_bands<T: Send>(
 }
 
 /// Like [`par_bands`], but each band worker also gets read access to source
-/// rows `[y0 − halo .. y1 + halo]` (clamped to the buffer) from the immutable
-/// `src` slice. This is the halo-tiling primitive for windowed kernels.
+/// rows `[y0 − halo .. y1 + halo]` (clamped to `src_height` rows) from the
+/// immutable `src` slice. `src` and `out` may have different heights (e.g.
+/// the vertical pass of a resampler); band partitioning follows `out`.
 pub fn par_bands_with_src<T: Send + Sync>(
     src: &[T],
     out: &mut [T],
     stride: usize,
-    height: u32,
+    src_height: u32,
     band_h: u32,
     halo: u32,
     f: impl Fn(u32, u32, &[T], &mut [T]) + Sync,
@@ -112,7 +113,7 @@ pub fn par_bands_with_src<T: Send + Sync>(
             let y0 = band as u32 * band_h;
             let y1 = y0 + (chunk.len() / stride) as u32;
             let s0 = (y0.saturating_sub(halo)) as usize * stride;
-            let s1 = (y1 + halo).min(height) as usize * stride;
+            let s1 = (y1 + halo).min(src_height) as usize * stride;
             f(y0, y1, &src[s0..s1], chunk);
         });
 }

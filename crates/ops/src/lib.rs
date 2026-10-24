@@ -7,3 +7,5 @@
 //! Invariants enforced by tests (ADR-0004): pure functions, identity at
 //! default parameters, output within [0, 1] where documented, no NaN, no
 //! panics on any input.
+
+pub mod geometry;

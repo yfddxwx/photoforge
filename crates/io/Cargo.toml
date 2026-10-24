@@ -8,3 +8,12 @@ authors.workspace = true
 description = "Image decoding/encoding, EXIF orientation, thumbnails and pyramids for photoforge"
 
 [dependencies]
+photoforge-core = { workspace = true }
+photoforge-ops = { workspace = true }
+image = { workspace = true }
+kamadak-exif = { workspace = true }
+thiserror = { workspace = true }
+rayon = { workspace = true }
+
+[dev-dependencies]
+photoforge-fixtures = { workspace = true }
