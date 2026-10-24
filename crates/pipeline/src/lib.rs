@@ -6,11 +6,13 @@
 //! hashes (ADR-0006), pyramid-level preview rendering and full-resolution
 //! fused export replay.
 
+pub mod command;
 pub mod geometry;
 pub mod mask;
 pub mod render;
 pub mod state;
 
+pub use command::StateCommand;
 pub use geometry::{Geometry, Quality};
 pub use mask::{Mask, Stroke};
 pub use render::Renderer;

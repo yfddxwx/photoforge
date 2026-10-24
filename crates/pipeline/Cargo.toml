@@ -11,6 +11,7 @@ description = "Non-destructive editing pipeline for photoforge"
 photoforge-core = { workspace = true }
 photoforge-ops = { workspace = true }
 photoforge-io = { workspace = true }
+photoforge-history = { workspace = true }
 rayon = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }

@@ -8,3 +8,10 @@ authors.workspace = true
 description = "Command-pattern undo/redo with memory cap and disk spill"
 
 [dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+log = { workspace = true }
+
+[dev-dependencies]
+serde = { workspace = true }

@@ -8,3 +8,8 @@ authors.workspace = true
 description = "Preset and .pfg sidecar serialization for photoforge"
 
 [dependencies]
+photoforge-ops = { workspace = true }
+photoforge-pipeline = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }

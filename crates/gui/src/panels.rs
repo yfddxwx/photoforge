@@ -29,6 +29,46 @@ pub fn top_bar(app: &mut PhotoForgeApp, ctx: &egui::Context) {
             }
             ui.separator();
             if ui
+                .add_enabled(app.can_undo(), egui::Button::new("Undo (Ctrl+Z)"))
+                .clicked()
+            {
+                app.undo(ctx);
+            }
+            if ui
+                .add_enabled(app.can_redo(), egui::Button::new("Redo (Ctrl+Y)"))
+                .clicked()
+            {
+                app.redo(ctx);
+            }
+            if ui
+                .add_enabled(
+                    app.image().is_some(),
+                    egui::Button::new("Save .pfg (Ctrl+S)"),
+                )
+                .clicked()
+            {
+                app.save_sidecar();
+            }
+            if ui.button("Open Folder…").clicked() {
+                app.open_folder();
+            }
+            ui.separator();
+            ui.menu_button("Preset", |ui| {
+                if ui.button("Apply from file…").clicked() {
+                    apply_preset_dialog(app, ctx);
+                }
+                if ui
+                    .add_enabled(
+                        app.image().is_some(),
+                        egui::Button::new("Save global stack…"),
+                    )
+                    .clicked()
+                {
+                    save_preset_dialog(app, ctx);
+                }
+            });
+            ui.separator();
+            if ui
                 .add_enabled(app.image().is_some(), egui::Button::new("Export…"))
                 .clicked()
             {
@@ -804,8 +844,75 @@ pub fn status_bar(app: &mut PhotoForgeApp, ctx: &egui::Context) {
                 }
             }
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                ui.weak("M4 preview — curves, filters and masks land in M5–M7");
+                ui.weak("non-destructive: edits live in the .pfg sidecar · Ctrl+S saves");
             });
         });
     });
+}
+
+fn apply_preset_dialog(app: &mut PhotoForgeApp, ctx: &egui::Context) {
+    if let Some(path) = rfd::FileDialog::new()
+        .add_filter("photoforge preset", &["json"])
+        .pick_file()
+    {
+        match photoforge_presets::Preset::from_file(&path) {
+            Ok(preset) => {
+                let name = preset.name.clone();
+                app.edit_state(ctx, false, |s| preset.apply_to(s));
+                app.set_status_pub(format!("Applied preset \"{name}\""));
+            }
+            Err(e) => app.set_status_pub(format!("Preset load failed: {e}")),
+        }
+    }
+}
+
+fn save_preset_dialog(app: &mut PhotoForgeApp, _ctx: &egui::Context) {
+    if let Some(path) = rfd::FileDialog::new()
+        .add_filter("photoforge preset", &["json"])
+        .set_file_name("preset.json")
+        .save_file()
+    {
+        let preset = photoforge_presets::Preset::from_state(app.state(), "preset");
+        match preset.to_file(&path) {
+            Ok(()) => app.set_status_pub(format!("Preset saved to {}", path.display())),
+            Err(e) => app.set_status_pub(format!("Preset save failed: {e}")),
+        }
+    }
+}
+
+/// Bottom filmstrip: folder thumbnails, click to switch images.
+pub fn filmstrip_panel(app: &mut PhotoForgeApp, ctx: &egui::Context) {
+    if app.filmstrip.is_empty() {
+        return;
+    }
+    egui::TopBottomPanel::bottom("filmstrip")
+        .resizable(false)
+        .show(ctx, |ui| {
+            egui::ScrollArea::horizontal().show(ui, |ui| {
+                ui.horizontal(|ui| {
+                    let current = app.image().map(|i| i.path.clone());
+                    let mut switch: Option<std::path::PathBuf> = None;
+                    for item in &app.filmstrip {
+                        let selected = current.as_ref() == Some(&item.path);
+                        let resp = ui
+                            .add(egui::Image::new(&item.texture).max_height(84.0))
+                            .interact(egui::Sense::click());
+                        if selected {
+                            ui.painter().rect_stroke(
+                                resp.rect,
+                                2.0,
+                                egui::Stroke::new(2.0_f32, egui::Color32::from_rgb(120, 170, 230)),
+                            );
+                        }
+                        if resp.clicked() {
+                            switch = Some(item.path.clone());
+                        }
+                        resp.on_hover_text(item.path.display().to_string());
+                    }
+                    if let Some(p) = switch {
+                        app.switch_to_image(ctx, p);
+                    }
+                });
+            });
+        });
 }

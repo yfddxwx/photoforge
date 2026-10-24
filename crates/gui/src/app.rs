@@ -64,6 +64,36 @@ pub struct PhotoForgeApp {
     export_running: bool,
     export_progress: f32,
     show_exif: bool,
+
+    // History (M8): whole-state commands (ADR-0009).
+    history: photoforge_history::History<EditState, photoforge_pipeline::StateCommand>,
+    /// State snapshot captured when an interactive edit begins.
+    edit_base: Option<EditState>,
+    /// Filmstrip items (thumbnails decoded on a background thread).
+    pub filmstrip: Vec<FilmItem>,
+    film_rx: Option<std::sync::mpsc::Receiver<PendingFilm>>,
+    /// Per-image edit states for switching back and forth.
+    state_cache: std::collections::HashMap<PathBuf, EditState>,
+}
+
+/// Thumbnail pixels shipped from the filmstrip decode thread.
+struct PendingFilm {
+    path: PathBuf,
+    rgba: Vec<u8>,
+    w: usize,
+    h: usize,
+}
+
+/// One filmstrip thumbnail.
+pub struct FilmItem {
+    pub path: PathBuf,
+    pub texture: egui::TextureHandle,
+}
+
+const HISTORY_BUDGET: usize = 64 * 1024 * 1024;
+
+fn session_path() -> Option<PathBuf> {
+    dirs::data_dir().map(|d| d.join("photoforge").join("session.json"))
 }
 
 impl PhotoForgeApp {
@@ -94,9 +124,20 @@ impl PhotoForgeApp {
             export_running: false,
             export_progress: 0.0,
             show_exif: false,
+            history: photoforge_history::History::new(
+                HISTORY_BUDGET,
+                std::env::temp_dir().join(format!("photoforge_undo_{}", std::process::id())),
+            ),
+            edit_base: None,
+            filmstrip: Vec::new(),
+            film_rx: None,
+            state_cache: std::collections::HashMap::new(),
         };
         if let Some(path) = image_path {
             app.request_open(path);
+        } else {
+            // No explicit file: try the crash-recovery session.
+            app.try_restore_session();
         }
         let _ = cc;
         app
@@ -252,7 +293,7 @@ impl PhotoForgeApp {
                             .file_name()
                             .map(|n| n.to_string_lossy().to_string())
                             .unwrap_or_default(),
-                        path,
+                        path: path.clone(),
                         exif,
                         width,
                         height,
@@ -273,6 +314,17 @@ impl PhotoForgeApp {
                         .join("export.jpg")
                         .to_string_lossy()
                         .to_string();
+                    // Restore edits: per-image cache, then sidecar, then fresh.
+                    let restored = self.state_cache.get(&path).cloned();
+                    let state = match restored {
+                        Some(st) => Some(st),
+                        None => photoforge_presets::load_sidecar(&path).ok().flatten(),
+                    };
+                    if let Some(st) = state {
+                        self.state = Arc::new(st);
+                        self.state_rev += 1;
+                        self.status.push_str(" — edits restored");
+                    }
                     self.send_render(ctx);
                 }
                 Ok(Frame::LoadFailed(msg)) => {
@@ -435,10 +487,25 @@ impl PhotoForgeApp {
 impl eframe::App for PhotoForgeApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         self.poll_worker(ctx);
+        self.poll_filmstrip(ctx);
 
         ctx.input(|i| {
             if i.modifiers.ctrl && i.key_pressed(egui::Key::O) {
                 self.open_file_dialog();
+            }
+            if i.modifiers.ctrl && i.key_pressed(egui::Key::Z) && !i.modifiers.shift {
+                self.undo(ctx);
+            }
+            if (i.modifiers.ctrl && i.modifiers.shift && i.key_pressed(egui::Key::Z))
+                || (i.modifiers.ctrl && i.key_pressed(egui::Key::Y))
+            {
+                self.redo(ctx);
+            }
+            if i.modifiers.ctrl && i.key_pressed(egui::Key::S) {
+                self.save_sidecar();
+            }
+            if i.modifiers.ctrl && i.key_pressed(egui::Key::E) {
+                self.export_open = true;
             }
         });
         if self.image.is_some() {
@@ -500,6 +567,7 @@ impl eframe::App for PhotoForgeApp {
         crate::panels::adjustment_panel(self, ctx);
         let events = crate::panels::central_canvas(self, ctx);
         self.handle_canvas_events(ctx, events);
+        crate::panels::filmstrip_panel(self, ctx);
         crate::panels::export_dialog(self, ctx);
         crate::panels::status_bar(self, ctx);
     }
@@ -560,9 +628,240 @@ impl PhotoForgeApp {
         interacting: bool,
         f: impl FnOnce(&mut EditState),
     ) {
+        if interacting && self.edit_base.is_none() {
+            self.edit_base = Some((*self.state).clone());
+        }
         let state = Arc::make_mut(&mut self.state);
         f(state);
         self.state_changed(ctx, interacting);
+        if !interacting {
+            self.commit_history();
+        }
+    }
+
+    /// Pushes a history command if the state changed since the edit began,
+    /// then autosaves the session and sidecar.
+    fn commit_history(&mut self) {
+        if let Some(base) = self.edit_base.take() {
+            if base != *self.state {
+                let label = self
+                    .state
+                    .adjustments
+                    .iter()
+                    .zip(base.adjustments.iter())
+                    .find(|(n, o)| n.op != o.op || n.enabled != o.enabled)
+                    .map(|(n, _)| n.op.label())
+                    .unwrap_or("edit");
+                let cmd =
+                    photoforge_pipeline::StateCommand::new(label, base, (*self.state).clone());
+                self.history.push(cmd, &self.state);
+                self.autosave();
+            }
+        }
+    }
+
+    pub fn undo(&mut self, ctx: &egui::Context) {
+        let mut s = (*self.state).clone();
+        if let Some(label) = self.history.undo(&mut s) {
+            self.state = Arc::new(s);
+            self.state_rev += 1;
+            self.edit_base = None;
+            self.mask_overlay = None;
+            self.send_render(ctx);
+            self.autosave();
+            self.status = format!("Undo: {label}");
+        }
+    }
+
+    pub fn redo(&mut self, ctx: &egui::Context) {
+        let mut s = (*self.state).clone();
+        if let Some(label) = self.history.redo(&mut s) {
+            self.state = Arc::new(s);
+            self.state_rev += 1;
+            self.edit_base = None;
+            self.mask_overlay = None;
+            self.send_render(ctx);
+            self.autosave();
+            self.status = format!("Redo: {label}");
+        }
+    }
+
+    pub fn can_undo(&self) -> bool {
+        self.history.can_undo()
+    }
+
+    pub fn can_redo(&self) -> bool {
+        self.history.can_redo()
+    }
+
+    /// Saves the `.pfg` sidecar next to the open image.
+    pub fn save_sidecar(&mut self) {
+        if let Some(img) = &self.image {
+            match photoforge_presets::save_sidecar(&img.path, &self.state) {
+                Ok(p) => self.status = format!("Saved {}", p.display()),
+                Err(e) => self.status = format!("Sidecar save failed: {e}"),
+            }
+        }
+    }
+
+    /// Writes the crash-recovery session file (image path + state).
+    fn autosave(&mut self) {
+        let Some(sp) = session_path() else {
+            return;
+        };
+        let Some(img) = &self.image else {
+            return;
+        };
+        let doc = serde_json::json!({
+            "version": 1,
+            "image": img.path.to_string_lossy(),
+            "state": &*self.state,
+        });
+        if std::fs::create_dir_all(sp.parent().expect("has parent")).is_ok() {
+            std::fs::write(&sp, doc.to_string()).ok();
+        }
+    }
+
+    /// Restores the last session at startup (called after the worker is up).
+    pub fn try_restore_session(&mut self) {
+        let Some(sp) = session_path() else {
+            return;
+        };
+        let Ok(text) = std::fs::read_to_string(&sp) else {
+            return;
+        };
+        let Ok(doc) = serde_json::from_str::<serde_json::Value>(&text) else {
+            return;
+        };
+        let Some(path) = doc.get("image").and_then(|v| v.as_str()) else {
+            return;
+        };
+        let Ok(state) =
+            serde_json::from_value::<EditState>(doc.get("state").cloned().unwrap_or_default())
+        else {
+            return;
+        };
+        let path = PathBuf::from(path);
+        if path.exists() {
+            self.state = Arc::new(state);
+            self.state_rev += 1;
+            self.status = "Restored previous session".into();
+            self.request_open(path);
+        }
+    }
+
+    /// Opens a folder and starts background thumbnail decoding.
+    pub fn open_folder(&mut self) {
+        let Some(dir) = rfd::FileDialog::new().pick_folder() else {
+            return;
+        };
+        let mut files: Vec<PathBuf> = std::fs::read_dir(&dir)
+            .map(|rd| {
+                rd.filter_map(|e| e.ok())
+                    .map(|e| e.path())
+                    .filter(|p| {
+                        p.extension()
+                            .and_then(|e| e.to_str())
+                            .map(|e| {
+                                matches!(
+                                    e.to_ascii_lowercase().as_str(),
+                                    "jpg" | "jpeg" | "png" | "webp" | "tif" | "tiff" | "bmp"
+                                )
+                            })
+                            .unwrap_or(false)
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        files.sort();
+        if files.is_empty() {
+            self.status = format!("No images in {}", dir.display());
+            return;
+        }
+        let (tx, rx) = std::sync::mpsc::channel::<PendingFilm>();
+        self.film_rx = Some(rx);
+        self.filmstrip.clear();
+        std::thread::Builder::new()
+            .name("photoforge-filmstrip".into())
+            .spawn(move || {
+                for path in files {
+                    if let Ok(decoded) = photoforge_io::decode_file(&path) {
+                        let thumb = photoforge_io::thumbnail(&decoded.buffer, 140);
+                        let item = PendingFilm {
+                            path,
+                            rgba: thumb.as_raw().to_vec(),
+                            w: thumb.width() as usize,
+                            h: thumb.height() as usize,
+                        };
+                        if tx.send(item).is_err() {
+                            break;
+                        }
+                    }
+                }
+            })
+            .ok();
+    }
+
+    /// Polls filmstrip thumbnails and creates their textures.
+    fn poll_filmstrip(&mut self, ctx: &egui::Context) {
+        let mut got = false;
+        while let Some(rx) = &self.film_rx {
+            match rx.try_recv() {
+                Ok(item) => {
+                    got = true;
+                    let texture = ctx.load_texture(
+                        format!("film_{}", item.path.display()),
+                        egui::ColorImage::from_rgba_unmultiplied([item.w, item.h], &item.rgba),
+                        egui::TextureOptions::LINEAR,
+                    );
+                    self.filmstrip.push(FilmItem {
+                        path: item.path,
+                        texture,
+                    });
+                }
+                Err(_) => break,
+            }
+        }
+        if got {
+            // Stop polling once the last decoded file matches the open image.
+            ctx.request_repaint();
+        }
+    }
+
+    /// Switches to another filmstrip image, caching the current edits.
+    pub fn switch_to_image(&mut self, ctx: &egui::Context, path: PathBuf) {
+        if Some(&path) == self.image.as_ref().map(|i| &i.path) {
+            return;
+        }
+        if let Some(img) = &self.image {
+            self.state_cache
+                .insert(img.path.clone(), (*self.state).clone());
+        }
+        self.history_cleanup_for_switch();
+        match self.state_cache.get(&path).cloned() {
+            Some(state) => {
+                self.state = Arc::new(state);
+                self.state_rev += 1;
+                self.request_open(path);
+            }
+            None => {
+                // Sidecar (or fresh) is applied when loading completes.
+                self.request_open(path);
+            }
+        }
+        ctx.request_repaint();
+    }
+
+    fn history_cleanup_for_switch(&mut self) {
+        self.history = photoforge_history::History::new(
+            HISTORY_BUDGET,
+            std::env::temp_dir().join(format!(
+                "photoforge_undo_{}_{}",
+                std::process::id(),
+                self.state_rev
+            )),
+        );
+        self.edit_base = None;
     }
 
     pub fn export_ui(&mut self) -> ExportUi<'_> {

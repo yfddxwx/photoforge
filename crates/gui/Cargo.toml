@@ -16,6 +16,10 @@ photoforge-core = { workspace = true }
 photoforge-io = { workspace = true }
 photoforge-ops = { workspace = true }
 photoforge-pipeline = { workspace = true }
+photoforge-history = { workspace = true }
+photoforge-presets = { workspace = true }
+dirs = { workspace = true }
+serde_json = { workspace = true }
 eframe = { workspace = true }
 egui = "0.29"
 rfd = { workspace = true }
