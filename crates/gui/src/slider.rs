@@ -68,3 +68,7 @@ pub fn fmt_stops(v: f32) -> String {
 pub fn fmt_signed(v: f32) -> String {
     format!("{v:+.2}")
 }
+
+pub fn fmt_plain(v: f32) -> String {
+    format!("{v:.2}")
+}

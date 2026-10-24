@@ -111,7 +111,7 @@ fn editing_last_op_reuses_earlier_stages() {
 
     // Edit the LAST global op (saturation) only: stages 0..=8 remain valid.
     let mut edited = state.clone();
-    edited.adjustments[8].op = OpParams::Saturation { amount: 0.6 };
+    edited.adjustments[11].op = OpParams::Saturation { amount: 0.6 };
     let misses_before = r.stats.final_misses;
     r.sync_state(&edited);
     let out = r.render_level(&pyr, 0, Quality::Final);
@@ -156,7 +156,7 @@ fn masked_gradient_exposure_blends() {
     let pyr = pyramid_of(base);
     let mut state = identity_state();
     // Replace saturation (last) with a masked exposure +2.
-    state.adjustments[8] = photoforge_pipeline::Adjustment::masked(
+    state.adjustments[11] = photoforge_pipeline::Adjustment::masked(
         OpParams::Exposure { stops: 2.0 },
         Mask::LinearGradient {
             start: [0.0, 0.5],
@@ -184,7 +184,7 @@ fn radial_mask_center_only() {
     let base = solid(80, 80, [128, 128, 128, 255]);
     let pyr = pyramid_of(base);
     let mut state = identity_state();
-    state.adjustments[8] = photoforge_pipeline::Adjustment::masked(
+    state.adjustments[11] = photoforge_pipeline::Adjustment::masked(
         OpParams::Exposure { stops: 3.0 },
         Mask::RadialGradient {
             center: [0.5, 0.5],
@@ -256,8 +256,8 @@ fn full_export_equals_level0_render() {
     state.adjustments[1].op = OpParams::Exposure { stops: 0.7 };
     state.adjustments[3].op = OpParams::Highlights { amount: -0.6 };
     state.adjustments[4].op = OpParams::Shadows { amount: 0.4 };
-    state.adjustments[7].op = OpParams::Vibrance { amount: 0.5 };
-    state.adjustments[8].op = OpParams::Saturation { amount: -0.2 };
+    state.adjustments[10].op = OpParams::Vibrance { amount: 0.5 };
+    state.adjustments[11].op = OpParams::Saturation { amount: -0.2 };
 
     let mut staged = Renderer::new(state.clone());
     let a = staged.render_level(&pyr, 0, Quality::Final);
@@ -278,7 +278,7 @@ fn render_full_applies_masks_and_geometry() {
     let mut state = identity_state();
     state.adjustments[1].op = OpParams::Exposure { stops: 2.0 };
     // Mask runs over the PRE-crop frame: fully applied from x = 30 onward.
-    state.adjustments[8] = photoforge_pipeline::Adjustment::masked(
+    state.adjustments[11] = photoforge_pipeline::Adjustment::masked(
         OpParams::Exposure { stops: -2.0 },
         Mask::LinearGradient {
             start: [0.0, 0.5],
@@ -307,7 +307,7 @@ fn render_full_applies_masks_and_geometry() {
 fn mask_rasters_are_cached() {
     let pyr = pyramid_of(gradient_h(32, 32));
     let mut state = identity_state();
-    state.adjustments[8] = photoforge_pipeline::Adjustment::masked(
+    state.adjustments[11] = photoforge_pipeline::Adjustment::masked(
         OpParams::Exposure { stops: 1.0 },
         Mask::Brush {
             strokes: vec![Stroke {
@@ -363,7 +363,7 @@ fn property_random_states_never_panic() {
             };
         }
         if case % 2 == 0 {
-            state.adjustments[8] = photoforge_pipeline::Adjustment::masked(
+            state.adjustments[11] = photoforge_pipeline::Adjustment::masked(
                 OpParams::Exposure { stops: 1.5 },
                 if case % 4 == 0 {
                     Mask::RadialGradient {

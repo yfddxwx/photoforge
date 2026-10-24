@@ -8,6 +8,19 @@ project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Added
 
+- M5: tone curves — Fritsch-Carlson monotone cubic splines, per-channel
+  (R/G/B) plus luma channel, applied in the sRGB-encoded domain with a
+  prepared 4096-entry LUT in the pipeline; draggable curve editor widget
+  (add on click, right-click removes, per-channel colors).
+- M5: levels (black/gamma/white, encoded domain) with histogram-percentile
+  auto button.
+- M5: eight-zone HSL color mixer (raised-cosine zone weights on the hue
+  wheel, tabbed per-zone UI).
+- M5: .cube 3D LUT import (parser, trilinear sampler, display-domain
+  application) with file dialog.
+- M5: continuous sRGB encode table (16-bit) for sub-8-bit-precision
+  encoded-domain ops.
+
 - M3: `ops` pointwise adjustments — exposure (+1 EV = exact ×2), contrast
   (18% pivot power curve), highlights/shadows/whites/blacks (provably
   monotone region ops pinning black/white points), white balance (warm/cool

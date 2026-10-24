@@ -2,6 +2,7 @@
 
 mod app;
 mod canvas;
+mod curve_editor;
 mod panels;
 mod slider;
 mod worker;

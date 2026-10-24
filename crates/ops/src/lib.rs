@@ -9,7 +9,11 @@
 //! panics on any input.
 
 pub mod color;
+pub mod curves;
 pub mod geometry;
+pub mod hsl;
+pub mod levels;
+pub mod lut;
 pub mod params;
 pub mod tone;
 

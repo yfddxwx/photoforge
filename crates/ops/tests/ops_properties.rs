@@ -13,7 +13,7 @@ fn random_image(rng: &mut XorShift64, w: u32, h: u32) -> LinearImage {
 }
 
 fn random_params(rng: &mut XorShift64) -> Vec<OpParams> {
-    use photoforge_ops::params::GLOBAL_OP_ORDER;
+    use photoforge_ops::params::{OpKind, GLOBAL_OP_ORDER};
     let mut out = Vec::new();
     for kind in GLOBAL_OP_ORDER {
         if rng.next_f32() < 0.4 {
@@ -21,20 +21,52 @@ fn random_params(rng: &mut XorShift64) -> Vec<OpParams> {
         }
         let amount = rng.range_f32(-1.0, 1.0);
         let p = match kind {
-            photoforge_ops::params::OpKind::Exposure => OpParams::Exposure {
+            OpKind::Exposure => OpParams::Exposure {
                 stops: rng.range_f32(-4.0, 4.0),
             },
-            photoforge_ops::params::OpKind::Contrast => OpParams::Contrast { amount },
-            photoforge_ops::params::OpKind::Highlights => OpParams::Highlights { amount },
-            photoforge_ops::params::OpKind::Shadows => OpParams::Shadows { amount },
-            photoforge_ops::params::OpKind::Whites => OpParams::Whites { amount },
-            photoforge_ops::params::OpKind::Blacks => OpParams::Blacks { amount },
-            photoforge_ops::params::OpKind::WhiteBalance => OpParams::WhiteBalance {
+            OpKind::Contrast => OpParams::Contrast { amount },
+            OpKind::Highlights => OpParams::Highlights { amount },
+            OpKind::Shadows => OpParams::Shadows { amount },
+            OpKind::Whites => OpParams::Whites { amount },
+            OpKind::Blacks => OpParams::Blacks { amount },
+            OpKind::WhiteBalance => OpParams::WhiteBalance {
                 temp: amount,
                 tint: rng.range_f32(-1.0, 1.0),
             },
-            photoforge_ops::params::OpKind::Vibrance => OpParams::Vibrance { amount },
-            photoforge_ops::params::OpKind::Saturation => OpParams::Saturation { amount },
+            OpKind::ToneCurve => {
+                // Random monotone S-ish curve through (0,0)/(1,1).
+                let x1 = rng.range_f32(0.2, 0.45);
+                let y1 = rng.range_f32(0.05, x1);
+                let x2 = rng.range_f32(0.55, 0.8);
+                let y2 = rng.range_f32(x2, 0.95);
+                let pts = vec![[0.0, 0.0], [x1, y1], [x2, y2], [1.0, 1.0]];
+                OpParams::ToneCurve {
+                    r: pts.clone(),
+                    g: pts.clone(),
+                    b: pts.clone(),
+                    l: Vec::new(),
+                }
+            }
+            OpKind::Levels => OpParams::Levels {
+                black: rng.range_f32(0.0, 0.15),
+                gamma: rng.range_f32(0.6, 1.8),
+                white: rng.range_f32(0.85, 1.0),
+            },
+            OpKind::Hsl => {
+                let mut zones = [[0.0f32; 3]; 8];
+                let zone = rng.range_u32(8) as usize;
+                zones[zone] = [
+                    rng.range_f32(-30.0, 30.0),
+                    rng.range_f32(-0.8, 0.8),
+                    rng.range_f32(-0.5, 0.5),
+                ];
+                OpParams::Hsl { zones }
+            }
+            OpKind::Vibrance => OpParams::Vibrance { amount },
+            OpKind::Saturation => OpParams::Saturation { amount },
+            OpKind::Lut => {
+                continue; // random LUT tables aren't meaningful; identity stays covered
+            }
         };
         out.push(p);
     }

@@ -88,6 +88,10 @@ impl PhotoForgeApp {
         }
     }
 
+    pub fn set_status_pub(&mut self, s: impl Into<String>) {
+        self.status = s.into();
+    }
+
     /// Public entry for panel-initiated opens.
     pub fn request_open_pub(&mut self, path: PathBuf) {
         self.request_open(path);

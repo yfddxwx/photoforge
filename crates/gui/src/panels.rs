@@ -6,7 +6,8 @@ use photoforge_ops::OpParams;
 
 use crate::app::PhotoForgeApp;
 use crate::canvas::{self, CanvasInput, CanvasResponse};
-use crate::slider::{fmt_signed, fmt_stops, ParamRow};
+use crate::curve_editor::{self, CurveChannel};
+use crate::slider::{fmt_plain, fmt_signed, fmt_stops, ParamRow};
 
 pub fn top_bar(app: &mut PhotoForgeApp, ctx: &egui::Context) {
     let mut open_clicked = false;
@@ -79,14 +80,34 @@ pub fn adjustment_panel(app: &mut PhotoForgeApp, ctx: &egui::Context) {
                 tone_row(app, ui, 6, "Blacks");
 
                 ui.add_space(6.0);
+                ui.strong("Tone Curve");
+                ui.separator();
+                curve_section(app, ui);
+
+                ui.add_space(6.0);
+                ui.strong("Levels");
+                ui.separator();
+                levels_section(app, ui);
+
+                ui.add_space(6.0);
+                ui.strong("Color Mixer (HSL)");
+                ui.separator();
+                hsl_section(app, ui);
+
+                ui.add_space(6.0);
                 ui.strong("Color");
                 ui.separator();
-                chroma_row(app, ui, 7, "Vibrance");
-                chroma_row(app, ui, 8, "Saturation");
+                chroma_row(app, ui, 10, "Vibrance");
+                chroma_row(app, ui, 11, "Saturation");
+
+                ui.add_space(6.0);
+                ui.strong("LUT");
+                ui.separator();
+                lut_section(app, ui);
 
                 ui.add_space(8.0);
                 ui.weak(format!(
-                    "{} global adjustments — curves/levels, filters and masks land in M5–M7",
+                    "{} global adjustments — filters and masks land in M6–M7",
                     GLOBAL_OP_ORDER.len()
                 ));
             });
@@ -271,6 +292,302 @@ fn chroma_row(app: &mut PhotoForgeApp, ui: &mut egui::Ui, idx: usize, label: &'s
         }
     };
     param_row(app, ui, binding(label, -1.0, 1.0, fmt_signed, get, set));
+}
+
+// --- M5 sections ---
+
+fn curve_points_channel(s: &photoforge_pipeline::EditState, ch: CurveChannel) -> Vec<[f32; 2]> {
+    s.adjustments
+        .get(7)
+        .and_then(|a| match &a.op {
+            OpParams::ToneCurve { r, g, b, l } => Some(match ch {
+                CurveChannel::R => r.clone(),
+                CurveChannel::G => g.clone(),
+                CurveChannel::B => b.clone(),
+                CurveChannel::L => l.clone(),
+            }),
+            _ => None,
+        })
+        .unwrap_or_default()
+}
+
+fn set_curve_points_channel(
+    s: &mut photoforge_pipeline::EditState,
+    ch: CurveChannel,
+    pts: Vec<[f32; 2]>,
+) {
+    if let Some(adj) = s.adjustments.get_mut(7) {
+        if let OpParams::ToneCurve { r, g, b, l } = &mut adj.op {
+            match ch {
+                CurveChannel::R => *r = pts,
+                CurveChannel::G => *g = pts,
+                CurveChannel::B => *b = pts,
+                CurveChannel::L => *l = pts,
+            }
+        }
+    }
+}
+
+fn curve_section(app: &mut PhotoForgeApp, ui: &mut egui::Ui) {
+    let channel_id = egui::Id::new("curve_channel");
+    let mut channel = ui.ctx().data_mut(|d| {
+        d.get_temp::<CurveChannel>(channel_id)
+            .unwrap_or(CurveChannel::L)
+    });
+    ui.horizontal(|ui| {
+        for ch in CurveChannel::ALL {
+            // ch: CurveChannel (Copy)
+            if ui
+                .selectable_label(
+                    channel == ch,
+                    egui::RichText::new(ch.label()).color(ch.color()),
+                )
+                .clicked()
+            {
+                channel = ch;
+            }
+        }
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            if ui.small_button("Reset").clicked() {
+                let mut empty = Vec::new();
+                app.edit_state(ui.ctx(), false, |s| {
+                    set_curve_points_channel(s, channel, std::mem::take(&mut empty));
+                });
+            }
+        });
+    });
+    ui.ctx().data_mut(|d| d.insert_temp(channel_id, channel));
+
+    let mut points = curve_points_channel(app.state(), channel);
+    let edit = curve_editor::show(ui, &mut points, channel);
+    if edit.changed {
+        app.edit_state(ui.ctx(), true, |s| {
+            set_curve_points_channel(s, channel, points.clone());
+        });
+    }
+    if edit.committed {
+        app.edit_state(ui.ctx(), false, |_| {});
+    }
+}
+
+fn levels_section(app: &mut PhotoForgeApp, ui: &mut egui::Ui) {
+    let levels_binding = |label: &'static str,
+                          min: f32,
+                          max: f32,
+                          get: fn(&OpParams) -> f32,
+                          set: fn(&mut OpParams, f32)| {
+        binding(
+            label,
+            min,
+            max,
+            fmt_plain,
+            move |s: &photoforge_pipeline::EditState| {
+                s.adjustments
+                    .get(8)
+                    .and_then(|a| match &a.op {
+                        OpParams::Levels { .. } => Some(get(&a.op)),
+                        _ => None,
+                    })
+                    .unwrap_or(0.0)
+            },
+            move |s: &mut photoforge_pipeline::EditState, v: f32| {
+                if let Some(adj) = s.adjustments.get_mut(8) {
+                    set(&mut adj.op, v);
+                }
+            },
+        )
+    };
+    let black = levels_binding(
+        "Black",
+        0.0,
+        0.4,
+        |p| match p {
+            OpParams::Levels { black, .. } => *black,
+            _ => 0.0,
+        },
+        |p, v| {
+            if let OpParams::Levels { black, .. } = p {
+                *black = v;
+            }
+        },
+    );
+    param_row(app, ui, black);
+    let gamma = levels_binding(
+        "Gamma",
+        0.25,
+        4.0,
+        |p| match p {
+            OpParams::Levels { gamma, .. } => *gamma,
+            _ => 1.0,
+        },
+        |p, v| {
+            if let OpParams::Levels { gamma, .. } = p {
+                *gamma = v;
+            }
+        },
+    );
+    param_row(app, ui, gamma);
+    let white = levels_binding(
+        "White",
+        0.6,
+        1.0,
+        |p| match p {
+            OpParams::Levels { white, .. } => *white,
+            _ => 1.0,
+        },
+        |p, v| {
+            if let OpParams::Levels { white, .. } = p {
+                *white = v;
+            }
+        },
+    );
+    param_row(app, ui, white);
+
+    ui.horizontal(|ui| {
+        if ui
+            .add_enabled(app.histogram().is_some(), egui::Button::new("Auto"))
+            .clicked()
+        {
+            if let Some(hist) = app.histogram() {
+                let b = f32::from(hist.luma_percentile(0.001)) / 255.0;
+                let w = f32::from(hist.luma_percentile(0.999)) / 255.0;
+                let (b, w) = if w - b < 0.05 { (0.0, 1.0) } else { (b, w) };
+                app.edit_state(ui.ctx(), false, |s| {
+                    if let Some(adj) = s.adjustments.get_mut(8) {
+                        if let OpParams::Levels { black, white, .. } = &mut adj.op {
+                            *black = b;
+                            *white = w;
+                        }
+                    }
+                });
+            }
+        }
+        if ui.small_button("Reset").clicked() {
+            app.edit_state(ui.ctx(), false, |s| {
+                if let Some(adj) = s.adjustments.get_mut(8) {
+                    adj.op = OpParams::Levels {
+                        black: 0.0,
+                        gamma: 1.0,
+                        white: 1.0,
+                    };
+                }
+            });
+        }
+    });
+}
+
+fn hsl_section(app: &mut PhotoForgeApp, ui: &mut egui::Ui) {
+    let zone_id = egui::Id::new("hsl_zone");
+    let mut zone = ui
+        .ctx()
+        .data_mut(|d| d.get_temp::<u8>(zone_id).unwrap_or(0)) as usize;
+    ui.horizontal_wrapped(|ui| {
+        for (i, name) in photoforge_ops::hsl::ZONE_NAMES.iter().enumerate() {
+            if ui.selectable_label(zone == i, *name).clicked() {
+                zone = i;
+            }
+        }
+    });
+    ui.ctx().data_mut(|d| d.insert_temp(zone_id, zone as u8));
+
+    let zone_copy = zone;
+    let zone_get = move |s: &photoforge_pipeline::EditState, which: usize| {
+        s.adjustments
+            .get(9)
+            .and_then(|a| match &a.op {
+                OpParams::Hsl { zones } => Some(zones[zone_copy][which]),
+                _ => None,
+            })
+            .unwrap_or(0.0)
+    };
+    let zone_set = move |s: &mut photoforge_pipeline::EditState, which: usize, v: f32| {
+        if let Some(adj) = s.adjustments.get_mut(9) {
+            if let OpParams::Hsl { zones } = &mut adj.op {
+                zones[zone_copy][which] = v;
+            }
+        }
+    };
+
+    let hue = binding(
+        "Hue",
+        -30.0,
+        30.0,
+        fmt_signed,
+        move |s| zone_get(s, 0),
+        move |s, v| zone_set(s, 0, v),
+    );
+    param_row(app, ui, hue);
+    let sat = binding(
+        "Sat",
+        -1.0,
+        1.0,
+        fmt_signed,
+        move |s| zone_get(s, 1),
+        move |s, v| zone_set(s, 1, v),
+    );
+    param_row(app, ui, sat);
+    let lum = binding(
+        "Lum",
+        -1.0,
+        1.0,
+        fmt_signed,
+        move |s| zone_get(s, 2),
+        move |s, v| zone_set(s, 2, v),
+    );
+    param_row(app, ui, lum);
+}
+
+fn lut_section(app: &mut PhotoForgeApp, ui: &mut egui::Ui) {
+    ui.horizontal(|ui| {
+        if ui.button("Load .cube…").clicked() {
+            if let Some(path) = rfd::FileDialog::new()
+                .add_filter("Cube LUT", &["cube"])
+                .pick_file()
+            {
+                match photoforge_ops::lut::CubeLut::from_file(&path) {
+                    Ok(lut) => {
+                        let name = if lut.name.is_empty() {
+                            path.file_name()
+                                .map(|n| n.to_string_lossy().to_string())
+                                .unwrap_or_default()
+                        } else {
+                            lut.name.clone()
+                        };
+                        let (size, table) = (lut.size, lut.table);
+                        app.edit_state(ui.ctx(), false, |s| {
+                            if let Some(adj) = s.adjustments.get_mut(12) {
+                                adj.op = OpParams::Lut { name, size, table };
+                            }
+                        });
+                    }
+                    Err(e) => {
+                        app.set_status_pub(format!("LUT load failed: {e}"));
+                    }
+                }
+            }
+        }
+        let name = app
+            .state()
+            .adjustments
+            .get(12)
+            .and_then(|a| match &a.op {
+                OpParams::Lut { name, table, .. } if !table.is_empty() => Some(name.clone()),
+                _ => None,
+            })
+            .unwrap_or_else(|| "(none)".into());
+        ui.weak(name);
+        if ui.small_button("Clear").clicked() {
+            app.edit_state(ui.ctx(), false, |s| {
+                if let Some(adj) = s.adjustments.get_mut(12) {
+                    adj.op = OpParams::Lut {
+                        name: String::new(),
+                        size: 0,
+                        table: Vec::new(),
+                    };
+                }
+            });
+        }
+    });
 }
 
 fn histogram_widget(app: &mut PhotoForgeApp, ui: &mut egui::Ui) {

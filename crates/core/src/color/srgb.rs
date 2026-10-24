@@ -120,6 +120,29 @@ pub fn encode_f32(x: f32) -> f32 {
     encode_u8(x) as f32 / 255.0
 }
 
+/// Continuous (non-u8-quantized) encode table: 65536 entries over [0, 1].
+static ENCODE_F32_LUT: LazyLock<Vec<f32>> = LazyLock::new(|| {
+    let mut t = Vec::with_capacity(LUT_SIZE);
+    for i in 0..LUT_SIZE {
+        t.push(encode_formula(i as f32 / LUT_MAX).clamp(0.0, 1.0));
+    }
+    t
+});
+
+/// Encodes linear light to a *continuous* sRGB-encoded f32 (no u8
+/// quantization) — used by encoded-domain ops (curves, levels, HSL, LUT) so
+/// adjustments stay smooth below the 8-bit grid.
+#[inline]
+pub fn encode_continuous(x: f32) -> f32 {
+    if x.is_nan() || x <= 0.0 {
+        return 0.0;
+    }
+    if x >= 1.0 {
+        return 1.0;
+    }
+    ENCODE_F32_LUT[(x * LUT_MAX) as usize]
+}
+
 /// Rec. 709 luma of a linear-light RGBA pixel.
 #[inline]
 pub fn luma(px: crate::Rgba32F) -> f32 {
