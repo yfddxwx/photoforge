@@ -18,4 +18,9 @@ serde_json = { workspace = true }
 uuid = { workspace = true }
 
 [dev-dependencies]
+criterion = { workspace = true }
 photoforge-fixtures = { workspace = true }
+
+[[bench]]
+name = "pipeline"
+harness = false

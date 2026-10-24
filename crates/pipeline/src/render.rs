@@ -170,23 +170,53 @@ impl Renderer {
             base
         });
 
-        for (i, (_, adj)) in active.iter().enumerate().skip(start) {
-            let mask = adj
-                .mask
-                .as_ref()
-                .map(|m| self.mask_raster(m, &adj.id, w, h));
-            let next = apply_adjustment(&img, adj.op.clone(), mask);
-            img = Arc::new(next);
+        // Execute in SEGMENTS: runs of pointwise ops fuse into one pass
+        // (with one Q16 materialization at the segment end); spatial ops are
+        // their own segment. Caching happens at segment ends — an edit to op
+        // k invalidates its segment and everything after (prefix hashes).
+        let mut idx = start;
+        while idx < n {
+            let (_, adj) = &active[idx];
+            if adj.op.is_pointwise() {
+                // Find the end of this pointwise run.
+                let mut end = idx + 1;
+                while end < n && active[end].1.op.is_pointwise() {
+                    end += 1;
+                }
+                // Build fused units (masked ops stay individual inside the run).
+                let ops_with_masks: Vec<(photoforge_ops::OpParams, Option<Arc<Vec<f32>>>)> = active
+                    [idx..end]
+                    .iter()
+                    .map(|(_, adj)| {
+                        let mask = adj
+                            .mask
+                            .as_ref()
+                            .map(|m| self.mask_raster(m, &adj.id, w, h));
+                        (adj.op.clone(), mask)
+                    })
+                    .collect();
+                let lin = img.to_linear();
+                let out = apply_pointwise_units(&lin, &ops_with_masks);
+                img = Arc::new(LinearImageQ16::from_linear(&out));
+                idx = end; // the whole run applied at once
+            } else {
+                let mask = adj
+                    .mask
+                    .as_ref()
+                    .map(|m| self.mask_raster(m, &adj.id, w, h));
+                let next = apply_adjustment(&img, adj.op.clone(), mask);
+                img = Arc::new(next);
+                idx += 1;
+            }
             self.cache_put(
                 CacheKey::Stage {
                     level: level as u32,
-                    stage: i + 1,
+                    stage: idx,
                 },
-                prefix.at(i + 1),
+                prefix.at(idx),
                 Payload::Stage(img.clone()),
             );
         }
-
         let mut result = img.to_pixel_buffer();
         if !self.state.geometry.is_identity() {
             result = self.state.geometry.apply(&result, quality);
@@ -299,6 +329,10 @@ fn run_pointwise_segment(
     let mut out = LinearImage::new(w, h);
     let stride = w as usize * 4;
     let src_ref = src;
+    // Build fused units: unmasked runs share one encode/decode round-trip
+    // (ops::fuse_run); masked ops stay individual (their blend needs the
+    // per-op input).
+    let units = build_units(segment);
     par_bands(&mut out.data, stride, 32, |y0, y1, band| {
         for y in y0..y1 {
             let srow = &src_ref.data[y as usize * stride..(y as usize + 1) * stride];
@@ -311,9 +345,9 @@ fn run_pointwise_segment(
                     srow[x * 4 + 2],
                     srow[x * 4 + 3],
                 ];
-                for (op, mask) in segment {
+                for (fused, mask) in &units {
                     let p = q;
-                    q = op.apply_pixel(p);
+                    q = fused(p);
                     if let Some(m) = mask {
                         let mv = m[y as usize * w as usize + x];
                         if mv <= 0.0 {
@@ -330,6 +364,72 @@ fn run_pointwise_segment(
         }
     });
     out
+}
+
+/// Applies fused pointwise units over a linear-light image, out-of-place.
+fn apply_pointwise_units(
+    src: &LinearImage,
+    ops_with_masks: &[(photoforge_ops::OpParams, Option<Arc<Vec<f32>>>)],
+) -> LinearImage {
+    let units = build_units(ops_with_masks);
+    let (w, h) = (src.width, src.height);
+    let mut out = LinearImage::new(w, h);
+    let stride = w as usize * 4;
+    let src_ref = src;
+    par_bands(&mut out.data, stride, 32, |y0, y1, band| {
+        for y in y0..y1 {
+            let srow = &src_ref.data[y as usize * stride..(y as usize + 1) * stride];
+            let off = (y - y0) as usize * stride;
+            let orow = &mut band[off..off + stride];
+            for (x, o) in orow.chunks_exact_mut(4).enumerate() {
+                let mut q = [
+                    srow[x * 4],
+                    srow[x * 4 + 1],
+                    srow[x * 4 + 2],
+                    srow[x * 4 + 3],
+                ];
+                for (fused, mask) in &units {
+                    let p = q;
+                    q = fused(p);
+                    if let Some(m) = mask {
+                        let mv = m[y as usize * w as usize + x];
+                        if mv <= 0.0 {
+                            q = p;
+                        } else if mv < 1.0 {
+                            for c in 0..4 {
+                                q[c] = lerp(p[c], q[c], mv);
+                            }
+                        }
+                    }
+                }
+                o.copy_from_slice(&q);
+            }
+        }
+    });
+    out
+}
+
+/// One fused evaluation unit: a `fuse_run` over a run of unmasked pointwise
+/// ops, or a single masked op, plus its optional mask raster.
+type Unit = (photoforge_ops::params::PixelFn, Option<Arc<Vec<f32>>>);
+
+fn build_units(segment: &[(photoforge_ops::OpParams, Option<Arc<Vec<f32>>>)]) -> Vec<Unit> {
+    let mut units = Vec::new();
+    let mut run: Vec<photoforge_ops::Prepared> = Vec::new();
+    for (op, mask) in segment {
+        if mask.is_none() {
+            run.push(op.prepare());
+        } else {
+            if !run.is_empty() {
+                units.push((photoforge_ops::fuse_run(std::mem::take(&mut run)), None));
+            }
+            units.push((op.prepare_pixel_fn(), mask.clone()));
+        }
+    }
+    if !run.is_empty() {
+        units.push((photoforge_ops::fuse_run(run), None));
+    }
+    units
 }
 
 fn apply_adjustment(

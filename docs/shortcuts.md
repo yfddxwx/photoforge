@@ -1,7 +1,6 @@
 # Keyboard shortcuts
 
-Shortcuts are implemented by the GUI milestone by milestone; this file is the
-contract they implement.
+All shortcuts below are implemented in the GUI (M4–M8).
 
 ## View
 
@@ -18,28 +17,29 @@ contract they implement.
 
 | Shortcut | Action |
 |----------|--------|
-| `Ctrl+Z` | Undo |
-| `Ctrl+Shift+Z` / `Ctrl+Y` | Redo |
 | `Ctrl+S` | Save `.pfg` sidecar |
 | `Ctrl+E` | Export |
 | `Ctrl+O` | Open image |
+| `Ctrl+Z` | Undo (with history labels) |
+| `Ctrl+Y` / `Ctrl+Shift+Z` | Redo |
 | Double-click slider | Reset slider to default |
 
 ## Tools
 
 | Shortcut | Action |
 |----------|--------|
-| `C` | Crop tool |
-| `B` | Brush mask |
+| `C` | Crop tool (session: thirds grid, aspect lock, straighten) |
+| `B` | Brush mask (local adjustment) |
 | `G` | Linear gradient mask |
 | `R` | Radial gradient mask |
 | `V` | No tool (navigate) |
 | `Enter` | Apply crop |
-| `Esc` | Cancel crop / close dialog |
+| `Esc` | Cancel crop |
 
-## Compare
+## Compare & library
 
 | Shortcut | Action |
 |----------|--------|
 | `\` (hold) | Show original (before) |
-| `P` | Toggle split (before/after) view |
+| `P` | Toggle split (before/after) view; drag the divider |
+| Open Folder… | Filmstrip of the folder; click thumbnails to switch images |

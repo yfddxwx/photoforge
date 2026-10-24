@@ -11,3 +11,10 @@ description = "Pure image operations (adjustments and geometry) for photoforge"
 photoforge-core = { workspace = true }
 rayon = { workspace = true }
 serde = { workspace = true }
+
+[dev-dependencies]
+criterion = { workspace = true }
+
+[[bench]]
+name = "ops"
+harness = false

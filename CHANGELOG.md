@@ -8,6 +8,27 @@ project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Added
 
+- M8: `photoforge-history` — generic command-pattern undo/redo with a byte
+  budget, JSON disk spill with transparent reload, and a snapshot ring
+  (ADR-0009).
+- M8: `photoforge-presets` — version-checked JSON presets (global stack
+  only) and `.pfg` sidecars stored next to originals (ADR-0010).
+- M8: GUI history wiring — labeled undo/redo (Ctrl+Z/Y), sidecar save
+  (Ctrl+S), crash-recovery session autosave/restore, preset save/apply
+  dialogs, filmstrip folder view with background thumbnails and per-image
+  state caching.
+- M8: `photoforge-cli` — headless batch export (preset + sidecar merge,
+  rayon-parallel, EXIF-correct, optional resize/sidecar-out/skip-existing),
+  covered by end-to-end tests.
+- M8: criterion benchmarks for ops and the pipeline (fit-preview and 24 MP
+  export scenarios) with measured-numbers documentation and a gap analysis
+  against the CPU-only budgets (ARCHITECTURE.md).
+- M8: performance work — `Prepared` domain-tagged op functions with
+  `fuse_run` batched encode/decode, 3-D LUTs for OKLab/HSL ops, segment-level
+  preview caching, fast integer-hash grain noise.
+- M8: cargo-dist release configuration (workspace metadata + release
+  workflow) for three-platform artifacts.
+
 - M5: tone curves — Fritsch-Carlson monotone cubic splines, per-channel
   (R/G/B) plus luma channel, applied in the sRGB-encoded domain with a
   prepared 4096-entry LUT in the pipeline; draggable curve editor widget

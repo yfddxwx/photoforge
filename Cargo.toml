@@ -51,6 +51,16 @@ rfd = "0.14"
 dirs = "5"
 criterion = "0.5"
 
+# cargo-dist release configuration (see .github/workflows/release.yml).
+[workspace.metadata.dist]
+# Build GUI + CLI binaries for the three desktop targets.
+targets = ["x86_64-unknown-linux-gnu", "x86_64-pc-windows-msvc", "aarch64-apple-darwin", "x86_64-apple-darwin"]
+include = ["crates/gui", "crates/cli"]
+auto-includes = true
+# Windows and macOS artifacts are code-signing-free for now.
+windows-archive = ".zip"
+unix-archive = ".tar.gz"
+
 [profile.release]
 opt-level = 3
 lto = "thin"

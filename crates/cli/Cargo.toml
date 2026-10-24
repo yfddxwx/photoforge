@@ -11,4 +11,19 @@ description = "Headless batch processor: apply presets to a directory and export
 name = "photoforge-cli"
 path = "src/main.rs"
 
+[dev-dependencies]
+photoforge-fixtures = { workspace = true }
+photoforge-pipeline = { workspace = true }
+photoforge-presets = { workspace = true }
+photoforge-io = { workspace = true }
+
 [dependencies]
+photoforge-core = { workspace = true }
+photoforge-io = { workspace = true }
+photoforge-ops = { workspace = true }
+photoforge-pipeline = { workspace = true }
+photoforge-presets = { workspace = true }
+clap = { workspace = true }
+rayon = { workspace = true }
+env_logger = { workspace = true }
+log = { workspace = true }

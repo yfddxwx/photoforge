@@ -100,6 +100,41 @@ and sends back a frame. During slider drags the worker renders a coarser
 level for latency, then a full-quality frame when interaction stops. Full-size
 export runs on a second worker with progress messages.
 
+## Performance: design and measured numbers
+
+The processing chain is built for throughput: pointwise runs fuse into a
+single pass (`ops::fuse_run` — consecutive sRGB-encoded-domain ops share one
+encode/decode round-trip), hot ops precompute LUTs at prepare time (4096-entry
+1-D tables for curves/levels/contrast, 33³ trilinear 3-D tables for the OKLab
+chroma ops and HSL, hoisted gains for exposure/WB), the preview path caches
+per-segment results (Q16) keyed by prefix hashes, and spatial filters run as
+band-parallel whole-image passes.
+
+Measured on the development machine (a **shared, sandboxed Windows VM**,
+16 vCPU — run-to-run timings vary by 3–5×; treat as order-of-magnitude):
+
+| Scenario (criterion, `cargo bench`) | Budget | Measured (typical) |
+|---|---|---|
+| Fit preview, 20-adjustment stack (≈1600×1050) | 16 ms | 1.7–3.4 s |
+| Full-res export, 24 MP, 20 adjustments | 3 s | 4–13 s |
+| Gaussian blur σ4, 1 MP | — | ~16 ms |
+| Lanczos3 2400×1600→1200×800 | — | ~60 ms |
+
+The two headline budgets are **not met on CPU alone** in this environment and
+the gap is dominated by per-pixel scalar work across ~13 sequential pointwise
+ops (per-op boxed-closure dispatch + LUT round-trips ≈ hundreds of ns/pixel
+total). Closing it requires the explicitly-deferred acceleration track:
+
+1. **SIMD/SoA rework** of the fused pointwise chain (f32x8, LUT ops aside) —
+   estimated 4–8×;
+2. **wgpu compute** for the spatial filters and the tonal chain — the
+   estimated path to real-time previews (the user-visible requirement lists
+   GPU acceleration as the sanctioned follow-up once core milestones land).
+
+The architecture is shaped for both: ops are pure per-pixel/whole-image
+functions with data-only parameters, the fused chain is a single loop over
+`Prepared` values, and there is no hidden global state to port.
+
 ## Non-goals / future work
 
 GPU compute (wgpu) and RAW decoding (`rawler`) are explicitly deferred until

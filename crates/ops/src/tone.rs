@@ -14,7 +14,7 @@
 //!   for such windows `c · w′(c) ≤ 0.75` at every point, so gains with
 //!   `|k| ≤ 1.33` keep `d(out)/dc ≥ 0`. All coefficients here are ≤ 0.8.
 
-use photoforge_core::color::srgb::luma;
+use photoforge_core::color::srgb::{self, luma};
 use photoforge_core::math::{clamp01, lerp, smoothstep};
 use photoforge_core::Rgba32F;
 
@@ -158,6 +158,42 @@ pub fn white_balance_pixel(px: Rgba32F, temp: f32, tint: f32) -> Rgba32F {
         clamp01(px[2] * gain_b),
         px[3],
     ]
+}
+
+/// Contrast transfer on an sRGB-encoded value (the prepared-LUT path).
+#[inline]
+pub fn contrast_encoded(e: f32, amount: f32) -> f32 {
+    if amount == 0.0 {
+        return e;
+    }
+    const PIVOT: f32 = 0.18;
+    let k = f32::exp2(amount * 1.5);
+    // Evaluate in linear light (pivot semantics), then re-encode.
+    pivot_contrast(srgb::decode(e), PIVOT, k).clamp(0.0, 1.0)
+}
+
+/// The channel gains for a white-balance setting (hoisted out of the pixel
+/// loop by the prepared path).
+#[inline]
+pub fn white_balance_gains(temp: f32, tint: f32) -> [f32; 3] {
+    const WARM_R: f32 = 1.30;
+    const WARM_B: f32 = 0.72;
+    const COOL_R: f32 = 0.82;
+    const COOL_B: f32 = 1.28;
+    let mut gain_r = if temp > 0.0 {
+        lerp(1.0, WARM_R, temp)
+    } else {
+        lerp(1.0, COOL_R, -temp)
+    };
+    let mut gain_b = if temp > 0.0 {
+        lerp(1.0, WARM_B, temp)
+    } else {
+        lerp(1.0, COOL_B, -temp)
+    };
+    gain_r *= 1.0 + tint * 0.10;
+    gain_b *= 1.0 + tint * 0.10;
+    let gain_g = 1.0 - tint * 0.25;
+    [gain_r, gain_g, gain_b]
 }
 
 #[cfg(test)]

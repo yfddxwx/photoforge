@@ -21,4 +21,4 @@ pub mod lut;
 pub mod params;
 pub mod tone;
 
-pub use params::OpParams;
+pub use params::{fuse_run, OpParams, Prepared};

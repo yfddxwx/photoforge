@@ -37,12 +37,13 @@ fn exposure_matches_direct_math() {
     let mut r = Renderer::new(state);
     let out = r.render_level(&pyr, 0, Quality::Final);
 
-    // Expected: Q16 roundtrip through the exposure op.
+    // Expected: Q16 roundtrip through the exposure op via the PREPARED path
+    // (the pipeline runs prepared fns; apply_pixel is the slow reference).
     let mut expected = photoforge_core::LinearImageQ16::from_pixel_buffer(&pyr.level(0));
     let mut tmp = expected.to_linear();
+    let f = photoforge_ops::OpParams::Exposure { stops: 1.0 }.prepare_pixel_fn();
     for px in tmp.data.chunks_exact_mut(4) {
-        let q = photoforge_ops::OpParams::Exposure { stops: 1.0 }
-            .apply_pixel([px[0], px[1], px[2], px[3]]);
+        let q = f([px[0], px[1], px[2], px[3]]);
         px.copy_from_slice(&q);
     }
     expected = photoforge_core::LinearImageQ16::from_linear(&tmp);

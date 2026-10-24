@@ -13,3 +13,5 @@ consequences). Decisions are immutable; superseding ones link forward.
 | [0006](0006-caching-and-quantization.md) | Pipeline caching: prefix hashes, Q16 stages, LRU budget |
 | [0007](0007-mask-representation.md) | Mask representation: normalized shapes, per-pixel lerp |
 | [0008](0008-adjustment-stack-layout.md) | Adjustment stack: fixed global order + local instances |
+| [0009](0009-history-model.md) | History: whole-state commands, memory budget, disk spill |
+| [0010](0010-preset-and-sidecar-formats.md) | Preset and .pfg sidecar formats |

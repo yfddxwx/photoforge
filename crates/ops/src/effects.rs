@@ -4,21 +4,22 @@
 
 use photoforge_core::color::srgb::luma;
 use photoforge_core::math::clamp01;
-use photoforge_core::rng::XorShift64;
 use photoforge_core::tile::par_bands;
 use photoforge_core::LinearImage;
 
-/// Deterministic value noise: integer lattice hashed with xorshift, bilinear
+/// Deterministic value noise: integer lattice hashed with a splitmix-style
+/// finalizer (cheaper than constructing an RNG per lattice point), bilinear
 /// interpolation between lattice points. Two octaves: base at `size` px
 /// spacing + one at half spacing scaled by `roughness`.
 fn value_noise(x: f32, y: f32, seed: u64) -> f32 {
     let hash = |ix: i64, iy: i64| -> f32 {
-        let mut h = XorShift64::new(
-            (ix as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15)
-                ^ (iy as u64).wrapping_mul(0xC2B2_AE3D_27D4_EB4F)
-                ^ seed,
-        );
-        h.next_f32()
+        let mut h = (ix as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15)
+            ^ (iy as u64).wrapping_mul(0xC2B2_AE3D_27D4_EB4F)
+            ^ seed;
+        h ^= h >> 33;
+        h = h.wrapping_mul(0xFF51_AFD7_ED55_8CCD);
+        h ^= h >> 33;
+        (h >> 40) as f32 / (1u64 << 24) as f32
     };
     let ix = x.floor() as i64;
     let iy = y.floor() as i64;

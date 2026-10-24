@@ -9,7 +9,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::{bw, color, curves, denoise, effects, filters, hsl, levels, lut, tone};
 use photoforge_core::color::srgb;
-use photoforge_core::math::lerp;
+use photoforge_core::math::{clamp01, lerp};
 use photoforge_core::Rgba32F;
 
 /// Parameters of one adjustment. Serialized with an internally tagged
@@ -202,6 +202,77 @@ fn default_white() -> f32 {
 
 /// A prepared per-pixel function (curve/levels ops precompute LUTs here).
 pub type PixelFn = Box<dyn Fn(Rgba32F) -> Rgba32F + Send + Sync>;
+
+/// A prepared function over sRGB-encoded RGB triples.
+pub type EncodedFn = Box<dyn Fn([f32; 3]) -> [f32; 3] + Send + Sync>;
+
+/// A prepared op, tagged with its working domain (ADR-0002): linear-domain
+/// ops apply directly; encoded-domain ops are batched by [`fuse_run`] so a
+/// run pays one encode/decode round-trip instead of one per op.
+pub enum Prepared {
+    Linear(PixelFn),
+    Encoded(EncodedFn),
+}
+
+/// Fuses a run of prepared ops into one per-pixel function: consecutive
+/// encoded-domain ops share a single encode/decode.
+pub fn fuse_run(mut run: Vec<Prepared>) -> PixelFn {
+    if run.len() == 1 {
+        return match run.pop().expect("len 1") {
+            Prepared::Linear(f) => f,
+            Prepared::Encoded(f) => Box::new(move |px: Rgba32F| {
+                let e = [
+                    srgb::encode_continuous(px[0]),
+                    srgb::encode_continuous(px[1]),
+                    srgb::encode_continuous(px[2]),
+                ];
+                let o = f(e);
+                [
+                    srgb::decode(o[0]),
+                    srgb::decode(o[1]),
+                    srgb::decode(o[2]),
+                    px[3],
+                ]
+            }),
+        };
+    }
+    Box::new(move |px: Rgba32F| {
+        let mut cur = px;
+        let mut i = 0usize;
+        while i < run.len() {
+            match &run[i] {
+                Prepared::Linear(f) => {
+                    cur = f(cur);
+                    i += 1;
+                }
+                Prepared::Encoded(_) => {
+                    let mut j = i;
+                    while j < run.len() && matches!(run[j], Prepared::Encoded(_)) {
+                        j += 1;
+                    }
+                    let mut e = [
+                        srgb::encode_continuous(cur[0]),
+                        srgb::encode_continuous(cur[1]),
+                        srgb::encode_continuous(cur[2]),
+                    ];
+                    for f in &run[i..j] {
+                        if let Prepared::Encoded(fe) = f {
+                            e = fe(e);
+                        }
+                    }
+                    cur = [
+                        srgb::decode(e[0]),
+                        srgb::decode(e[1]),
+                        srgb::decode(e[2]),
+                        cur[3],
+                    ];
+                    i = j;
+                }
+            }
+        }
+        cur
+    })
+}
 
 /// LUT resolution for prepared encoded-domain ops.
 const PREPARED_LUT_N: usize = 4096;
@@ -450,10 +521,11 @@ impl OpParams {
         }
     }
 
-    /// Builds an optimized per-pixel function for this op. Curve and levels
-    /// ops precompute a 4096-entry table over the encoded domain; everything
-    /// else wraps [`OpParams::apply_pixel`].
-    pub fn prepare_pixel_fn(&self) -> PixelFn {
+    /// Prepares this op tagged with its working domain: curve/levels use
+    /// 4096-entry encoded-domain LUTs, exposure/WB hoist their gains, and the
+    /// OKLab/HSL ops precompute 3D LUTs (sampled trilinearly) — all
+    /// benchmarked against the fit-preview budget.
+    pub fn prepare(&self) -> Prepared {
         match self {
             Self::ToneCurve { r, g, b, l } => {
                 let mut tables: [Option<[f32; PREPARED_LUT_N]>; 4] = [None, None, None, None];
@@ -470,16 +542,9 @@ impl OpParams {
                     }
                 }
                 if tables.iter().all(|t| t.is_none()) {
-                    return Box::new(|px| px);
+                    return Prepared::Encoded(Box::new(|e| e));
                 }
-                Box::new(move |px: Rgba32F| {
-                    // Encode to the (continuous) sRGB domain, apply per-channel
-                    // curves and the luma curve, decode back.
-                    let e = [
-                        srgb::encode_continuous(px[0]),
-                        srgb::encode_continuous(px[1]),
-                        srgb::encode_continuous(px[2]),
-                    ];
+                Prepared::Encoded(Box::new(move |e: [f32; 3]| {
                     let mut e = [
                         apply_table(e[0], &tables[0]),
                         apply_table(e[1], &tables[1]),
@@ -495,13 +560,8 @@ impl OpParams {
                             (e[2] * factor).clamp(0.0, 1.0),
                         ];
                     }
-                    [
-                        srgb::decode(e[0]),
-                        srgb::decode(e[1]),
-                        srgb::decode(e[2]),
-                        px[3],
-                    ]
-                })
+                    e
+                }))
             }
             Self::Levels {
                 black,
@@ -509,7 +569,7 @@ impl OpParams {
                 white,
             } => {
                 if self.is_identity() {
-                    return Box::new(|px| px);
+                    return Prepared::Encoded(Box::new(|e| e));
                 }
                 let (black, gamma, white) = (*black, *gamma, *white);
                 let mut t = [0.0f32; PREPARED_LUT_N];
@@ -521,26 +581,143 @@ impl OpParams {
                         white,
                     );
                 }
-                Box::new(move |px: Rgba32F| {
-                    let t = Some(t);
-                    let e = [
-                        apply_table(srgb::encode_continuous(px[0]), &t),
-                        apply_table(srgb::encode_continuous(px[1]), &t),
-                        apply_table(srgb::encode_continuous(px[2]), &t),
-                    ];
+                Prepared::Encoded(Box::new(move |e: [f32; 3]| {
                     [
-                        srgb::decode(e[0]),
-                        srgb::decode(e[1]),
-                        srgb::decode(e[2]),
-                        px[3],
+                        apply_table(e[0], &Some(t)),
+                        apply_table(e[1], &Some(t)),
+                        apply_table(e[2], &Some(t)),
                     ]
-                })
+                }))
+            }
+            Self::Exposure { stops } => {
+                let gain = f32::exp2(*stops);
+                if gain == 1.0 {
+                    Prepared::Linear(Box::new(|px| px))
+                } else {
+                    Prepared::Linear(Box::new(move |px: Rgba32F| {
+                        [
+                            clamp01(px[0] * gain),
+                            clamp01(px[1] * gain),
+                            clamp01(px[2] * gain),
+                            px[3],
+                        ]
+                    }))
+                }
+            }
+            Self::Contrast { amount } => {
+                if *amount == 0.0 {
+                    Prepared::Encoded(Box::new(|e| e))
+                } else {
+                    let mut t = [0.0f32; PREPARED_LUT_N];
+                    for (j, slot) in t.iter_mut().enumerate() {
+                        *slot =
+                            tone::contrast_encoded(j as f32 / (PREPARED_LUT_N - 1) as f32, *amount);
+                    }
+                    Prepared::Encoded(Box::new(move |e: [f32; 3]| {
+                        [
+                            apply_table(e[0], &Some(t)),
+                            apply_table(e[1], &Some(t)),
+                            apply_table(e[2], &Some(t)),
+                        ]
+                    }))
+                }
+            }
+            Self::WhiteBalance { temp, tint } => {
+                let (temp, tint) = (*temp, *tint);
+                if temp == 0.0 && tint == 0.0 {
+                    Prepared::Linear(Box::new(|px| px))
+                } else {
+                    let gains = tone::white_balance_gains(temp, tint);
+                    Prepared::Linear(Box::new(move |px: Rgba32F| {
+                        [
+                            clamp01(px[0] * gains[0]),
+                            clamp01(px[1] * gains[1]),
+                            clamp01(px[2] * gains[2]),
+                            px[3],
+                        ]
+                    }))
+                }
+            }
+            Self::Vibrance { amount } | Self::Saturation { amount } => {
+                // OKLab chroma ops are expensive per pixel; precompute a
+                // 33³ encoded-domain LUT and sample trilinearly.
+                if *amount == 0.0 {
+                    Prepared::Encoded(Box::new(|e| e))
+                } else {
+                    let n = 33u32;
+                    let op = self.clone();
+                    let mut table = Vec::with_capacity((n * n * n) as usize);
+                    for b in 0..n {
+                        for g in 0..n {
+                            for r in 0..n {
+                                let e = [
+                                    r as f32 / (n - 1) as f32,
+                                    g as f32 / (n - 1) as f32,
+                                    b as f32 / (n - 1) as f32,
+                                ];
+                                let lin =
+                                    [srgb::decode(e[0]), srgb::decode(e[1]), srgb::decode(e[2])];
+                                let out = match &op {
+                                    Self::Vibrance { amount } => color::vibrance_pixel(
+                                        [lin[0], lin[1], lin[2], 1.0],
+                                        *amount,
+                                    ),
+                                    Self::Saturation { amount } => color::saturation_pixel(
+                                        [lin[0], lin[1], lin[2], 1.0],
+                                        *amount,
+                                    ),
+                                    _ => unreachable!(),
+                                };
+                                table.push([
+                                    srgb::encode_continuous(out[0]),
+                                    srgb::encode_continuous(out[1]),
+                                    srgb::encode_continuous(out[2]),
+                                ]);
+                            }
+                        }
+                    }
+                    Prepared::Encoded(Box::new(move |e: [f32; 3]| lut::sample_table(&table, n, e)))
+                }
+            }
+            Self::Hsl { zones } => {
+                // HSL per pixel costs a full HSV round-trip with per-zone
+                // trig; precompute a 17³ encoded-domain LUT instead
+                // (~1.5 ms build, trilinear sampling afterwards).
+                let any_effect = zones
+                    .iter()
+                    .any(|z| z[0] != 0.0 || z[1] != 0.0 || z[2] != 0.0);
+                if !any_effect {
+                    Prepared::Encoded(Box::new(|e| e))
+                } else {
+                    let n = 17u32;
+                    let zones = *zones;
+                    let mut table = Vec::with_capacity((n * n * n) as usize);
+                    for b in 0..n {
+                        for g in 0..n {
+                            for r in 0..n {
+                                let e = [
+                                    r as f32 / (n - 1) as f32,
+                                    g as f32 / (n - 1) as f32,
+                                    b as f32 / (n - 1) as f32,
+                                ];
+                                table.push(hsl::hsl_encoded(e, &zones));
+                            }
+                        }
+                    }
+                    Prepared::Encoded(Box::new(move |e: [f32; 3]| lut::sample_table(&table, n, e)))
+                }
             }
             other => {
                 let op = other.clone();
-                Box::new(move |px: Rgba32F| op.apply_pixel(px))
+                Prepared::Linear(Box::new(move |px: Rgba32F| op.apply_pixel(px)))
             }
         }
+    }
+
+    /// Builds an optimized per-pixel function for this op (single-op form;
+    /// pipelines fusing runs should use [`OpParams::prepare`] + [`fuse_run`]).
+    pub fn prepare_pixel_fn(&self) -> PixelFn {
+        fuse_run(vec![self.prepare()])
     }
 }
 
