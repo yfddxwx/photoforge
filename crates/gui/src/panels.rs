@@ -105,31 +105,47 @@ pub fn adjustment_panel(app: &mut PhotoForgeApp, ctx: &egui::Context) {
                 ui.separator();
                 lut_section(app, ui);
 
+                ui.add_space(6.0);
+                ui.strong("Detail");
+                ui.separator();
+                crate::effects_panel::effect_section(app, ui, crate::effects_panel::SHARPEN);
+                crate::effects_panel::effect_section(app, ui, crate::effects_panel::CLARITY);
+                crate::effects_panel::effect_section(app, ui, crate::effects_panel::DENOISE);
+
+                ui.add_space(6.0);
+                ui.strong("Effects");
+                ui.separator();
+                crate::effects_panel::effect_section(app, ui, crate::effects_panel::BLUR);
+                crate::effects_panel::effect_section(app, ui, crate::effects_panel::GRAIN);
+                crate::effects_panel::effect_section(app, ui, crate::effects_panel::VIGNETTE);
+                crate::effects_panel::effect_section(app, ui, crate::effects_panel::BLACK_WHITE);
+                crate::effects_panel::effect_section(app, ui, crate::effects_panel::DUOTONE);
+
                 ui.add_space(8.0);
                 ui.weak(format!(
-                    "{} global adjustments — filters and masks land in M6–M7",
+                    "{} global adjustments \u{2014} masks and crop land in M7",
                     GLOBAL_OP_ORDER.len()
                 ));
             });
         });
 }
 
-type StateGetter = Box<dyn Fn(&photoforge_pipeline::EditState) -> f32>;
-type StateSetter = Box<dyn Fn(&mut photoforge_pipeline::EditState, f32)>;
+pub type StateGetter = Box<dyn Fn(&photoforge_pipeline::EditState) -> f32>;
+pub type StateSetter = Box<dyn Fn(&mut photoforge_pipeline::EditState, f32)>;
 
 /// A bound slider row: where to read the value, how to write it, and its
 /// slider range. Interactive while dragging; a refined render on release.
-struct ParamBinding {
-    label: &'static str,
-    min: f32,
-    max: f32,
-    default: f32,
-    format: fn(f32) -> String,
-    get: StateGetter,
-    set: StateSetter,
+pub struct ParamBinding {
+    pub label: &'static str,
+    pub min: f32,
+    pub max: f32,
+    pub default: f32,
+    pub format: fn(f32) -> String,
+    pub get: StateGetter,
+    pub set: StateSetter,
 }
 
-fn param_row(app: &mut PhotoForgeApp, ui: &mut egui::Ui, b: ParamBinding) {
+pub fn param_row(app: &mut PhotoForgeApp, ui: &mut egui::Ui, b: ParamBinding) {
     let mut value = (b.get)(app.state());
     let row = ParamRow {
         label: b.label,
@@ -150,7 +166,7 @@ fn param_row(app: &mut PhotoForgeApp, ui: &mut egui::Ui, b: ParamBinding) {
 }
 
 /// Builds a [`ParamBinding`] with the usual 0 default.
-fn binding(
+pub fn binding(
     label: &'static str,
     min: f32,
     max: f32,

@@ -31,13 +31,15 @@ impl EditState {
     }
 
     /// Builds the canonical global stack: one identity adjustment per
-    /// kind in [`photoforge_ops::params::GLOBAL_OP_ORDER`].
+    /// kind in [`photoforge_ops::params::GLOBAL_OP_ORDER`]; effect kinds
+    /// start disabled (see `photoforge_ops::params::DEFAULT_DISABLED`).
     pub fn with_global_stack() -> Self {
+        use photoforge_ops::params::{DEFAULT_DISABLED, GLOBAL_OP_ORDER};
         let mut state = Self::new();
-        for kind in photoforge_ops::params::GLOBAL_OP_ORDER {
-            state
-                .adjustments
-                .push(Adjustment::new(OpParams::identity_of(kind)));
+        for kind in GLOBAL_OP_ORDER {
+            let mut adj = Adjustment::new(OpParams::identity_of(kind));
+            adj.enabled = !DEFAULT_DISABLED.contains(&kind);
+            state.adjustments.push(adj);
         }
         state
     }
@@ -107,10 +109,21 @@ mod tests {
     fn global_stack_shape() {
         let s = EditState::with_global_stack();
         assert_eq!(s.adjustments.len(), GLOBAL_OP_ORDER.len());
-        for adj in &s.adjustments {
-            assert!(adj.enabled);
+        use photoforge_ops::params::DEFAULT_DISABLED;
+        for (adj, kind) in s.adjustments.iter().zip(GLOBAL_OP_ORDER) {
+            // Effect kinds start disabled by design.
+            assert_eq!(adj.enabled, !DEFAULT_DISABLED.contains(&kind));
             assert!(adj.mask.is_none());
-            assert!(adj.op.is_identity());
+            if adj.enabled {
+                assert!(
+                    adj.op.is_identity()
+                        || matches!(
+                            kind,
+                            photoforge_ops::params::OpKind::BlackWhite
+                                | photoforge_ops::params::OpKind::Duotone
+                        )
+                );
+            }
         }
         // Order matches the canonical order.
         for (adj, kind) in s.adjustments.iter().zip(GLOBAL_OP_ORDER) {

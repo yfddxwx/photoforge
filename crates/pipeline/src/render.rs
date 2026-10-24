@@ -196,57 +196,65 @@ impl Renderer {
         result
     }
 
-    /// Full-resolution export: fused single-pass replay (no per-stage
-    /// quantization), then geometry.
+    /// Full-resolution export: pointwise runs fuse into single passes;
+    /// spatial ops split the chain and run whole-image (ADR-0003/0006), then
+    /// geometry.
     pub fn render_full(&mut self, pyramid: &ImagePyramid, quality: Quality) -> PixelBuffer {
         let base = pyramid.level(0);
         let active = self.active_adjustments();
         let (w, h) = (base.width(), base.height());
-        let masks: Vec<Option<Arc<Vec<f32>>>> = active
+        // Owned op+mask list (masks rastereized at full res, cached).
+        let mut ops: Vec<(photoforge_ops::OpParams, Option<Arc<Vec<f32>>>)> = active
             .iter()
             .map(|(_, adj)| {
-                adj.mask
+                let mask = adj
+                    .mask
                     .as_ref()
-                    .map(|m| self.mask_raster(m, &adj.id, w, h))
+                    .map(|m| self.mask_raster(m, &adj.id, w, h));
+                (adj.op.clone(), mask)
             })
             .collect();
-        let ops: Vec<&photoforge_ops::OpParams> = active.iter().map(|(_, a)| &a.op).collect();
 
-        let lin = LinearImage::from_pixel_buffer(&base);
-        let mut out = LinearImage::new(w, h);
-        let stride = w as usize * 4;
-        let lin_ref = &lin;
-        par_bands(&mut out.data, stride, 32, |y0, y1, band| {
-            for y in y0..y1 {
-                let srow = &lin_ref.data[y as usize * stride..(y as usize + 1) * stride];
-                let off = (y - y0) as usize * stride;
-                let orow = &mut band[off..off + stride];
-                for (x, o) in orow.chunks_exact_mut(4).enumerate() {
-                    let mut q = [
-                        srow[x * 4],
-                        srow[x * 4 + 1],
-                        srow[x * 4 + 2],
-                        srow[x * 4 + 3],
-                    ];
-                    for (i, op) in ops.iter().enumerate() {
-                        let p = q;
-                        q = op.apply_pixel(p);
-                        if let Some(m) = &masks[i] {
-                            let mv = m[y as usize * w as usize + x];
+        let mut cur = LinearImage::from_pixel_buffer(&base);
+        let mut segment: Vec<(photoforge_ops::OpParams, Option<Arc<Vec<f32>>>)> = Vec::new();
+        for (op, mask) in ops.drain(..) {
+            if op.is_pointwise() {
+                segment.push((op, mask));
+            } else {
+                if !segment.is_empty() {
+                    cur = run_pointwise_segment(&cur, &segment);
+                    segment.clear();
+                }
+                // Spatial op with optional mask blend.
+                let mut next = if mask.is_some() {
+                    cur.clone()
+                } else {
+                    std::mem::replace(&mut cur, LinearImage::new(0, 0))
+                };
+                op.apply_image(&mut next);
+                if let Some(m) = &mask {
+                    for y in 0..h {
+                        for x in 0..w {
+                            let i = (y * w + x) as usize;
+                            let mv = m[i];
                             if mv <= 0.0 {
-                                q = p;
-                            } else if mv < 1.0 {
-                                for c in 0..4 {
-                                    q[c] = lerp(p[c], q[c], mv);
-                                }
+                                continue;
+                            }
+                            let mv = mv.min(1.0);
+                            for c in 0..4 {
+                                let j = i * 4 + c;
+                                next.data[j] = lerp(cur.data[j], next.data[j], mv);
                             }
                         }
                     }
-                    o.copy_from_slice(&q);
                 }
+                cur = next;
             }
-        });
-        let u8img = out.to_pixel_buffer();
+        }
+        if !segment.is_empty() {
+            cur = run_pointwise_segment(&cur, &segment);
+        }
+        let u8img = cur.to_pixel_buffer();
         if self.state.geometry.is_identity() {
             u8img
         } else {
@@ -287,6 +295,49 @@ impl Renderer {
 
 /// Applies one adjustment (pointwise op + optional mask blend) to a Q16
 /// stage buffer, row-parallel.
+/// Runs a fused segment of consecutive pointwise ops (with optional per-op
+/// mask blends) over the whole image, out-of-place.
+fn run_pointwise_segment(
+    src: &LinearImage,
+    segment: &[(photoforge_ops::OpParams, Option<Arc<Vec<f32>>>)],
+) -> LinearImage {
+    let (w, h) = (src.width, src.height);
+    let mut out = LinearImage::new(w, h);
+    let stride = w as usize * 4;
+    let src_ref = src;
+    par_bands(&mut out.data, stride, 32, |y0, y1, band| {
+        for y in y0..y1 {
+            let srow = &src_ref.data[y as usize * stride..(y as usize + 1) * stride];
+            let off = (y - y0) as usize * stride;
+            let orow = &mut band[off..off + stride];
+            for (x, o) in orow.chunks_exact_mut(4).enumerate() {
+                let mut q = [
+                    srow[x * 4],
+                    srow[x * 4 + 1],
+                    srow[x * 4 + 2],
+                    srow[x * 4 + 3],
+                ];
+                for (op, mask) in segment {
+                    let p = q;
+                    q = op.apply_pixel(p);
+                    if let Some(m) = mask {
+                        let mv = m[y as usize * w as usize + x];
+                        if mv <= 0.0 {
+                            q = p;
+                        } else if mv < 1.0 {
+                            for c in 0..4 {
+                                q[c] = lerp(p[c], q[c], mv);
+                            }
+                        }
+                    }
+                }
+                o.copy_from_slice(&q);
+            }
+        }
+    });
+    out
+}
+
 fn apply_adjustment(
     src: &LinearImageQ16,
     op: photoforge_ops::OpParams,
@@ -296,6 +347,29 @@ fn apply_adjustment(
         return src.clone();
     }
     let (w, h) = (src.width, src.height);
+    // Spatial ops run whole-image; masks blend against the pre-op pixels.
+    if !op.is_pointwise() {
+        let mut lin = src.to_linear();
+        if mask.is_some() {
+            let original = lin.clone();
+            op.apply_image(&mut lin);
+            if let Some(m) = &mask {
+                for (i, &mv) in m.iter().enumerate() {
+                    if mv <= 0.0 {
+                        continue;
+                    }
+                    let mv = mv.min(1.0);
+                    for c in 0..4 {
+                        let j = i * 4 + c;
+                        lin.data[j] = lerp(original.data[j], lin.data[j], mv);
+                    }
+                }
+            }
+        } else {
+            op.apply_image(&mut lin);
+        }
+        return LinearImageQ16::from_linear(&lin);
+    }
     let mut dst = LinearImageQ16::new(w, h);
     let stride = w as usize * 4;
     let src_ref = src;

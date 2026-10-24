@@ -67,6 +67,19 @@ fn random_params(rng: &mut XorShift64) -> Vec<OpParams> {
             OpKind::Lut => {
                 continue; // random LUT tables aren't meaningful; identity stays covered
             }
+            // Spatial effects: pointwise property tests don't apply; the
+            // dedicated filter test suites cover them (constant invariance,
+            // impulse response, noise reduction).
+            OpKind::Sharpen
+            | OpKind::Clarity
+            | OpKind::Denoise
+            | OpKind::Blur
+            | OpKind::BlackWhite
+            | OpKind::Duotone
+            | OpKind::Grain
+            | OpKind::Vignette => {
+                continue;
+            }
         };
         out.push(p);
     }
@@ -119,6 +132,16 @@ fn property_identity_is_bit_exact() {
         let input = random_image(&mut rng, w, h);
         for kind in photoforge_ops::params::GLOBAL_OP_ORDER {
             let p = OpParams::identity_of(kind);
+            if matches!(
+                kind,
+                photoforge_ops::params::OpKind::BlackWhite
+                    | photoforge_ops::params::OpKind::Duotone
+            ) {
+                // Conversions are "on" whenever enabled; their identity is
+                // the disabled state (covered by the pipeline tests).
+                assert!(!p.is_identity());
+                continue;
+            }
             assert!(p.is_identity(), "{kind:?} default not identity");
             let out_img = input
                 .data

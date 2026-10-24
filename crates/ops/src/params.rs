@@ -7,7 +7,7 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::{color, curves, hsl, levels, lut, tone};
+use crate::{bw, color, curves, denoise, effects, filters, hsl, levels, lut, tone};
 use photoforge_core::color::srgb;
 use photoforge_core::math::lerp;
 use photoforge_core::Rgba32F;
@@ -103,6 +103,93 @@ pub enum OpParams {
         #[serde(default)]
         table: Vec<[f32; 3]>,
     },
+    // --- spatial / position-dependent ops (apply_image, ADR-0003) ---
+    Sharpen {
+        #[serde(default)]
+        amount: f32,
+        #[serde(default = "default_radius")]
+        radius: f32,
+        #[serde(default)]
+        threshold: f32,
+    },
+    Clarity {
+        #[serde(default)]
+        amount: f32,
+    },
+    Denoise {
+        #[serde(default)]
+        strength: f32,
+    },
+    Blur {
+        #[serde(default)]
+        radius: f32,
+    },
+    BlackWhite {
+        #[serde(default = "default_bw_r")]
+        r: f32,
+        #[serde(default = "default_bw_g")]
+        g: f32,
+        #[serde(default = "default_bw_b")]
+        b: f32,
+    },
+    Duotone {
+        /// Shadow color in linear light (0..1 per channel).
+        #[serde(default)]
+        shadow: [f32; 3],
+        /// Highlight color in linear light.
+        #[serde(default = "default_duotone_highlight")]
+        highlight: [f32; 3],
+    },
+    Grain {
+        #[serde(default)]
+        amount: f32,
+        #[serde(default = "default_grain_size")]
+        size: f32,
+        #[serde(default)]
+        roughness: f32,
+        #[serde(default)]
+        seed: u64,
+    },
+    Vignette {
+        #[serde(default)]
+        amount: f32,
+        #[serde(default = "default_midpoint")]
+        midpoint: f32,
+        #[serde(default = "default_feather")]
+        feather: f32,
+    },
+}
+
+fn default_radius() -> f32 {
+    1.0
+}
+
+fn default_bw_r() -> f32 {
+    bw::BW_DEFAULTS[0]
+}
+
+fn default_bw_g() -> f32 {
+    bw::BW_DEFAULTS[1]
+}
+
+fn default_bw_b() -> f32 {
+    bw::BW_DEFAULTS[2]
+}
+
+fn default_duotone_highlight() -> [f32; 3] {
+    [1.0, 1.0, 1.0]
+}
+
+fn default_grain_size() -> f32 {
+    2.0
+}
+
+fn default_midpoint() -> f32 {
+    0.5
+}
+
+fn default_feather() -> f32 {
+    0.5
 }
 
 fn default_gamma() -> f32 {
@@ -154,6 +241,34 @@ impl OpParams {
                 size: 0,
                 table: Vec::new(),
             },
+            OpKind::Sharpen => Self::Sharpen {
+                amount: 0.0,
+                radius: 1.0,
+                threshold: 0.0,
+            },
+            OpKind::Clarity => Self::Clarity { amount: 0.0 },
+            OpKind::Denoise => Self::Denoise { strength: 0.0 },
+            OpKind::Blur => Self::Blur { radius: 0.0 },
+            OpKind::BlackWhite => Self::BlackWhite {
+                r: bw::BW_DEFAULTS[0],
+                g: bw::BW_DEFAULTS[1],
+                b: bw::BW_DEFAULTS[2],
+            },
+            OpKind::Duotone => Self::Duotone {
+                shadow: [0.0, 0.0, 0.0],
+                highlight: [1.0, 1.0, 1.0],
+            },
+            OpKind::Grain => Self::Grain {
+                amount: 0.0,
+                size: 2.0,
+                roughness: 0.0,
+                seed: 0,
+            },
+            OpKind::Vignette => Self::Vignette {
+                amount: 0.0,
+                midpoint: 0.5,
+                feather: 0.5,
+            },
         }
     }
 
@@ -173,6 +288,14 @@ impl OpParams {
             Self::Vibrance { .. } => OpKind::Vibrance,
             Self::Saturation { .. } => OpKind::Saturation,
             Self::Lut { .. } => OpKind::Lut,
+            Self::Sharpen { .. } => OpKind::Sharpen,
+            Self::Clarity { .. } => OpKind::Clarity,
+            Self::Denoise { .. } => OpKind::Denoise,
+            Self::Blur { .. } => OpKind::Blur,
+            Self::BlackWhite { .. } => OpKind::BlackWhite,
+            Self::Duotone { .. } => OpKind::Duotone,
+            Self::Grain { .. } => OpKind::Grain,
+            Self::Vignette { .. } => OpKind::Vignette,
         }
     }
 
@@ -200,6 +323,12 @@ impl OpParams {
                 .iter()
                 .all(|z| z[0] == 0.0 && z[1] == 0.0 && z[2] == 0.0),
             Self::Lut { table, .. } => table.is_empty(),
+            Self::Sharpen { amount, .. } | Self::Clarity { amount } => *amount == 0.0,
+            Self::Denoise { strength } | Self::Blur { radius: strength } => *strength == 0.0,
+            // B&W and duotone are conversions: they are "on" whenever
+            // enabled — the canonical identity is the disabled state.
+            Self::BlackWhite { .. } | Self::Duotone { .. } => false,
+            Self::Grain { amount, .. } | Self::Vignette { amount, .. } => *amount == 0.0,
         }
     }
 
@@ -219,13 +348,64 @@ impl OpParams {
             Self::Vibrance { .. } => "Vibrance",
             Self::Saturation { .. } => "Saturation",
             Self::Lut { .. } => "LUT",
+            Self::Sharpen { .. } => "Sharpening",
+            Self::Clarity { .. } => "Clarity",
+            Self::Denoise { .. } => "Noise Reduction",
+            Self::Blur { .. } => "Blur",
+            Self::BlackWhite { .. } => "Black && White",
+            Self::Duotone { .. } => "Duotone",
+            Self::Grain { .. } => "Grain",
+            Self::Vignette { .. } => "Vignette",
         }
     }
 
-    /// All ops in this milestone are pointwise (fusable); spatial ops land in
-    /// M6 and will extend this enum's behavior (ADR-0003).
+    /// Pointwise ops fuse into single-pass chains; spatial/position-dependent
+    /// ops (blur family, grain, vignette) run as whole-image passes and break
+    /// the chain (ADR-0003).
     pub fn is_pointwise(&self) -> bool {
-        true
+        !matches!(
+            self,
+            Self::Sharpen { .. }
+                | Self::Clarity { .. }
+                | Self::Denoise { .. }
+                | Self::Blur { .. }
+                | Self::Grain { .. }
+                | Self::Vignette { .. }
+        )
+    }
+
+    /// Whole-image in-place application for the spatial class. Pointwise ops
+    /// fall back to a prepared per-pixel loop (used by tests and simple
+    /// paths); the pipeline never routes pointwise ops here.
+    pub fn apply_image(&self, img: &mut photoforge_core::LinearImage) {
+        match self {
+            Self::Sharpen {
+                amount,
+                radius,
+                threshold,
+            } => filters::unsharp_mask(img, *amount, *radius, *threshold),
+            Self::Clarity { amount } => filters::clarity(img, *amount),
+            Self::Denoise { strength } => denoise::denoise(img, *strength),
+            Self::Blur { radius } => filters::gaussian_blur(img, *radius),
+            Self::Grain {
+                amount,
+                size,
+                roughness,
+                seed,
+            } => effects::grain(img, *amount, *size, *roughness, *seed),
+            Self::Vignette {
+                amount,
+                midpoint,
+                feather,
+            } => effects::vignette(img, *amount, *midpoint, *feather),
+            other => {
+                let prepared = other.prepare_pixel_fn();
+                for px in img.data.chunks_exact_mut(4) {
+                    let p = [px[0], px[1], px[2], px[3]];
+                    px.copy_from_slice(&prepared(p));
+                }
+            }
+        }
     }
 
     /// Applies the op to one linear-light RGBA pixel (alpha passes through).
@@ -257,6 +437,16 @@ impl OpParams {
                     px
                 }
             }
+            Self::BlackWhite { r, g, b } => bw::black_white_pixel(px, [*r, *g, *b]),
+            Self::Duotone { shadow, highlight } => bw::duotone_pixel(px, *shadow, *highlight),
+            // Spatial ops are applied via `apply_image`, not per pixel; a
+            // stray per-pixel call degrades to identity rather than panicking.
+            Self::Sharpen { .. }
+            | Self::Clarity { .. }
+            | Self::Denoise { .. }
+            | Self::Blur { .. }
+            | Self::Grain { .. }
+            | Self::Vignette { .. } => px,
         }
     }
 
@@ -388,10 +578,18 @@ pub enum OpKind {
     Vibrance,
     Saturation,
     Lut,
+    Sharpen,
+    Clarity,
+    Denoise,
+    Blur,
+    BlackWhite,
+    Duotone,
+    Grain,
+    Vignette,
 }
 
 /// The canonical global adjustment order (Lightroom-like; ADR-0008).
-pub const GLOBAL_OP_ORDER: [OpKind; 13] = [
+pub const GLOBAL_OP_ORDER: [OpKind; 21] = [
     OpKind::WhiteBalance,
     OpKind::Exposure,
     OpKind::Contrast,
@@ -405,4 +603,25 @@ pub const GLOBAL_OP_ORDER: [OpKind; 13] = [
     OpKind::Vibrance,
     OpKind::Saturation,
     OpKind::Lut,
+    OpKind::Sharpen,
+    OpKind::Clarity,
+    OpKind::Denoise,
+    OpKind::Blur,
+    OpKind::BlackWhite,
+    OpKind::Duotone,
+    OpKind::Grain,
+    OpKind::Vignette,
+];
+
+/// Effect kinds that start disabled in a fresh global stack (they change the
+/// look drastically, unlike the tonal defaults).
+pub const DEFAULT_DISABLED: [OpKind; 8] = [
+    OpKind::Sharpen,
+    OpKind::Clarity,
+    OpKind::Denoise,
+    OpKind::Blur,
+    OpKind::BlackWhite,
+    OpKind::Duotone,
+    OpKind::Grain,
+    OpKind::Vignette,
 ];

@@ -8,8 +8,12 @@
 //! default parameters, output within [0, 1] where documented, no NaN, no
 //! panics on any input.
 
+pub mod bw;
 pub mod color;
 pub mod curves;
+pub mod denoise;
+pub mod effects;
+pub mod filters;
 pub mod geometry;
 pub mod hsl;
 pub mod levels;
