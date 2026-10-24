@@ -8,4 +8,9 @@
 //! default parameters, output within [0, 1] where documented, no NaN, no
 //! panics on any input.
 
+pub mod color;
 pub mod geometry;
+pub mod params;
+pub mod tone;
+
+pub use params::OpParams;

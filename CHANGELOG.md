@@ -8,6 +8,20 @@ project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Added
 
+- M3: `ops` pointwise adjustments — exposure (+1 EV = exact ×2), contrast
+  (18% pivot power curve), highlights/shadows/whites/blacks (provably
+  monotone region ops pinning black/white points), white balance (warm/cool
+  anchor gains + tint), vibrance/saturation in OKLab. Full property suite:
+  purity, range, NaN-freedom, identity-at-defaults, tone monotonicity,
+  region selectivity.
+- M3: `photoforge-pipeline` — non-destructive renderer with fixed global
+  stack + masked local adjustments, Q16 per-stage caches keyed by FNV prefix
+  hashes (LRU byte budget), fused full-resolution export replay, mask
+  rasterization (brush / linear / radial gradients), geometry application.
+- M3: `core::LinearImageQ16` 16-bit linear stage storage (staged-vs-fused
+  drift ≤ 2 LSB, tested).
+- M3: ADRs 0006 (caching), 0007 (masks), 0008 (stack layout).
+
 - M2: `ops::geometry` — crop, rotate90, flip, straighten (arbitrary angle,
   edge-fill), perspective correction (4-point DLT homography), Lanczos3 and
   bilinear resize with proper downscale kernel widening, all resampling in
