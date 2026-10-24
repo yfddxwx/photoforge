@@ -12,3 +12,12 @@ name = "photoforge"
 path = "src/main.rs"
 
 [dependencies]
+photoforge-core = { workspace = true }
+photoforge-io = { workspace = true }
+photoforge-ops = { workspace = true }
+photoforge-pipeline = { workspace = true }
+eframe = { workspace = true }
+egui = "0.29"
+rfd = { workspace = true }
+log = { workspace = true }
+env_logger = { workspace = true }

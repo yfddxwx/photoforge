@@ -12,6 +12,7 @@ pub mod orient;
 pub mod pyramid;
 
 pub use decode::{decode_bytes, decode_file, DecodedImage};
+pub use encode::{encode_jpeg_bytes, encode_png_bytes, encode_to_file};
 pub use exif::ExifSummary;
 pub use orient::{apply_orientation, Orientation};
 pub use pyramid::{thumbnail, ImagePyramid};
